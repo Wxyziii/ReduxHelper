@@ -1,0 +1,27 @@
+{
+  "section": "timecycle",
+  "summary": "Suggested small atmosphere-related edits based on the provided snippet.",
+  "warnings": [
+    "Test this in-game before applying to more weather files."
+  ],
+  "patches": [
+    {
+      "id": "patch-001",
+      "filePath": "common/data/timecycle/example.xml",
+      "patchType": "find_replace",
+      "find": "<exampleValue value=\"1.000\" />",
+      "replace": "<exampleValue value=\"0.850\" />",
+      "reason": "Small reduction should make the effect less intense.",
+      "risk": "low",
+      "requiresManualReview": true
+    }
+  ],
+  "manualNotes": [
+    "Apply similar edits gradually instead of editing every weather file at once."
+  ],
+  "testingChecklist": [
+    "Launch the game after importing the file.",
+    "Test during daytime and night.",
+    "Compare screenshots before and after."
+  ]
+}

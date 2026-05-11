@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AI Patch Response",
+  "type": "object",
+  "required": [
+    "section",
+    "summary",
+    "warnings",
+    "patches",
+    "manualNotes",
+    "testingChecklist"
+  ],
+  "properties": {
+    "section": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "patches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "filePath",
+          "patchType",
+          "reason",
+          "risk",
+          "requiresManualReview"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "filePath": {
+            "type": "string"
+          },
+          "patchType": {
+            "type": "string",
+            "enum": [
+              "find_replace",
+              "full_file_replace",
+              "insert_before",
+              "insert_after",
+              "delete_block"
+            ]
+          },
+          "find": {
+            "type": "string"
+          },
+          "replace": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "requiresManualReview": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "manualNotes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "testingChecklist": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

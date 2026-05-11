@@ -1,0 +1,390 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redux AI Assistant</title>
+    <!-- React and Babel -->
+    <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+    
+    <!-- Tabler Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg: #0a0a0a;
+            --surface-1: #111111;
+            --surface-2: #181818;
+            --surface-3: #222222;
+            --border: #2a2a2a;
+            --border-emphasis: #383838;
+            --fg: #f0f0f0;
+            --fg-secondary: #888888;
+            --fg-muted: #555555;
+            --accent: #ffffff;
+            --ai-accent: #9D98D8;
+            --success: #1D9E75;
+            --success-fill: rgba(29, 158, 117, 0.1);
+            --warning: #BA7517;
+            --warning-fill: rgba(186, 117, 23, 0.1);
+            --danger: #C0392B;
+            --danger-fill: rgba(192, 57, 43, 0.15);
+            
+            --font-sans: 'Inter', -apple-system, sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--fg);
+            font-family: var(--font-sans);
+            font-size: 13px;
+            font-weight: 400;
+            line-height: 1.5;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+        input, textarea, select { font-family: inherit; background-color: var(--surface-2); border: 1px solid var(--border); color: var(--fg); outline: none; border-radius: 5px; }
+        input:focus, textarea:focus, select:focus { box-shadow: 0 0 0 1px var(--accent); }
+
+        .mono { font-family: var(--font-mono); }
+        .uppercase-label {
+            font-size: 10px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--fg-muted);
+        }
+
+        #root { height: 100%; display: flex; flex-direction: column; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo } = React;
+
+        const TopBar = () => (
+            <div style={{ height: '44px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '12px', flexShrink: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--accent)' }} />
+                    <span style={{ fontSize: '13px', fontWeight: 500 }}>Redux AI</span>
+                </div>
+                <div style={{ padding: '4px 10px', backgroundColor: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '12px', color: 'var(--fg-secondary)', fontSize: '11px' }}>
+                    GTA V Redux Project
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--success)', fontSize: '12px' }}>
+                    <i className="ti ti-check" style={{ fontSize: '14px' }}></i>
+                    <span>Saved</span>
+                </div>
+                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button className="top-btn">Scan</button>
+                    <button className="top-btn">Ask AI</button>
+                    <button className="top-btn filled">Export</button>
+                    <button className="top-btn-icon"><i className="ti ti-settings"></i></button>
+                </div>
+                <style>{`
+                    .top-btn { font-size: 12px; padding: 6px 12px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 5px; color: var(--fg-secondary); }
+                    .top-btn.filled { background: var(--accent); color: var(--bg); font-weight: 500; }
+                    .top-btn-icon { color: var(--fg-secondary); font-size: 18px; display: flex; align-items: center; }
+                `}</style>
+            </div>
+        );
+
+        const Sidebar = ({ activePage, setActivePage }) => {
+            const navItems = [
+                { id: 'dashboard', label: 'Dashboard', icon: 'ti-layout-dashboard' },
+                { type: 'divider' },
+                { id: 'timecycle', label: 'Timecycle', icon: 'ti-sun', badge: { type: 'ai', text: '3' } },
+                { id: 'tracers', label: 'Tracers', icon: 'ti-line-dashed' },
+                { id: 'hit-effects', label: 'Hit Effects', icon: 'ti-target' },
+                { id: 'kill-effect', label: 'Kill Effect', icon: 'ti-skull' },
+                { id: 'optimization', label: 'Optimization', icon: 'ti-bolt', badge: { type: 'warning', text: '!' } },
+                { id: 'textures', label: 'Textures', icon: 'ti-photo', badge: { type: 'count', text: '12' } },
+                { type: 'spacer' },
+                { id: 'export', label: 'Export', icon: 'ti-package', badge: { type: 'success', text: 'Ready' } },
+                { id: 'settings', label: 'Settings', icon: 'ti-settings' },
+            ];
+
+            return (
+                <div style={{ width: '192px', backgroundColor: 'var(--surface-1)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', padding: '16px 0', flexShrink: 0 }}>
+                    <div className="uppercase-label" style={{ padding: '0 16px 8px' }}>Workspace</div>
+                    {navItems.map((item, idx) => {
+                        if (item.type === 'divider') return <div key={idx} style={{ height: '1px', backgroundColor: 'var(--border)', margin: '8px 0' }} />;
+                        if (item.type === 'spacer') return <div key={idx} style={{ flexGrow: 1 }} />;
+                        const isActive = activePage === item.id;
+                        return (
+                            <button key={item.id} onClick={() => setActivePage(item.id)} className={`nav-item ${isActive ? 'active' : ''}`}>
+                                <i className={`ti ${item.icon}`} style={{ fontSize: '18px' }}></i>
+                                <span>{item.label}</span>
+                                {item.badge && <div className={`badge ${item.badge.type}`}>{item.badge.text}</div>}
+                            </button>
+                        );
+                    })}
+                    <style>{`
+                        .nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 16px; color: var(--fg-secondary); text-align: left; width: 100%; position: relative; }
+                        .nav-item:hover { background-color: var(--surface-3); }
+                        .nav-item.active { background-color: #1e1e1e; color: var(--fg); }
+                        .nav-item.active::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background-color: var(--accent); }
+                        .badge { margin-left: auto; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
+                        .badge.ai { color: var(--ai-accent); background: rgba(157, 152, 216, 0.1); }
+                        .badge.count { color: #666; background: #222; }
+                        .badge.warning { color: var(--warning); background: var(--warning-fill); }
+                        .badge.success { color: var(--success); background: var(--success-fill); }
+                    `}</style>
+                </div>
+            );
+        };
+
+        const RightPanel = () => (
+            <div style={{ width: '212px', backgroundColor: 'var(--surface-1)', borderLeft: '1px solid var(--border)', padding: '16px', display: 'flex', flexDirection: 'column', gap: '24px', flexShrink: 0 }}>
+                <div>
+                    <div className="uppercase-label" style={{ marginBottom: '12px' }}>Section Status</div>
+                    <div className="stat-group">
+                        <div className="stat-row"><span>Files added</span><span style={{ color: 'var(--fg)' }}>14</span></div>
+                        <div className="stat-row"><span>AI suggestions</span><span style={{ color: 'var(--ai-accent)' }}>3</span></div>
+                        <div className="stat-row"><span>Accepted</span><span style={{ color: 'var(--success)' }}>8</span></div>
+                        <div className="stat-row"><span>Warnings</span><span style={{ color: 'var(--warning)' }}>1</span></div>
+                        <div className="stat-row" style={{ borderBottom: 'none' }}><span>Export ready</span><span style={{ color: 'var(--success)' }}>Yes</span></div>
+                    </div>
+                </div>
+                <div>
+                    <div className="uppercase-label" style={{ marginBottom: '12px' }}>Current File</div>
+                    <div className="stat-group">
+                        <div className="stat-row"><span>Name</span><span className="mono" style={{ color: 'var(--fg)' }}>update.rpf</span></div>
+                        <div className="stat-row"><span>Type</span><span className="mono">RPF</span></div>
+                        <div className="stat-row"><span>Size</span><span>1.2 GB</span></div>
+                    </div>
+                </div>
+                <div style={{ flexGrow: 1 }}>
+                    <div className="uppercase-label" style={{ marginBottom: '12px' }}>All Sections</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {['Timecycle', 'Tracers', 'Hit Effects', 'Optimization'].map(s => (
+                            <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--fg-secondary)' }}>
+                                <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: s === 'Timecycle' ? 'var(--ai-accent)' : s === 'Optimization' ? 'var(--warning)' : 'var(--success)' }} />
+                                {s}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+                <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: '8px', padding: '12px', display: 'flex', gap: '8px' }}>
+                    <i className="ti ti-bulb" style={{ color: 'var(--fg-secondary)', fontSize: '18px' }}></i>
+                    <p style={{ fontStyle: 'italic', fontSize: '12px', color: 'var(--fg-secondary)' }}>Review high-risk AI changes in the Diff Review tab.</p>
+                </div>
+                <style>{`
+                    .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #222; font-size: 12px; color: var(--fg-secondary); }
+                `}</style>
+            </div>
+        );
+
+        const Dashboard = () => (
+            <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                <h1 style={{ fontSize: '17px', fontWeight: 500 }}>Dashboard Overview</h1>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
+                    {[
+                        { label: 'Files Loaded', value: '14', sub: 'Active session' },
+                        { label: 'AI Ready', value: '3', sub: 'Timecycle section', color: 'var(--ai-accent)' },
+                        { label: 'Warnings', value: '1', sub: 'Optimization', color: 'var(--warning)' }
+                    ].map(stat => (
+                        <div key={stat.label} style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', padding: '16px', borderRadius: '8px' }}>
+                            <div className="uppercase-label">{stat.label}</div>
+                            <div style={{ fontSize: '24px', fontWeight: 500, margin: '8px 0', color: stat.color || 'var(--fg)' }}>{stat.value}</div>
+                            <div style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>{stat.sub}</div>
+                        </div>
+                    ))}
+                </div>
+                <div>
+                    <div className="uppercase-label" style={{ marginBottom: '12px' }}>Recent Activity</div>
+                    <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' }}>
+                        {['Timecycle AI generation complete', 'update.rpf scanned', 'Backup created'].map((a, i) => (
+                            <div key={i} style={{ padding: '12px 16px', borderBottom: i < 2 ? '1px solid var(--border)' : 'none', display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                                <span>{a}</span>
+                                <span style={{ color: 'var(--fg-muted)' }}>{i+1}h ago</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+
+        const Timecycle = () => {
+            const [tab, setTab] = useState('files');
+            return (
+                <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '20px', height: '100%' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <div>
+                            <h1 style={{ fontSize: '17px', fontWeight: 500 }}>Timecycle</h1>
+                            <p style={{ color: 'var(--fg-secondary)', fontSize: '13px' }}>Atmospheric lighting & weather modifiers</p>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <button className="act-btn">Scan files</button>
+                            <button className="act-btn">Export section</button>
+                        </div>
+                    </div>
+                    <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', gap: '24px' }}>
+                        {['Files', 'Scan results', 'AI suggestions', 'Diff review'].map(t => (
+                            <button key={t} onClick={() => setTab(t.toLowerCase().replace(' ', '-'))}
+                                style={{ paddingBottom: '8px', fontSize: '13px', color: tab === t.toLowerCase().replace(' ', '-') ? 'var(--fg)' : 'var(--fg-muted)',
+                                borderBottom: tab === t.toLowerCase().replace(' ', '-') ? '2px solid var(--accent)' : 'none', marginBottom: '-1px' }}>{t}</button>
+                        ))}
+                    </div>
+                    <div style={{ flexGrow: 1, overflowY: 'auto' }}>
+                        {tab === 'files' && <FilesTab />}
+                        {tab === 'ai-suggestions' && <AISuggestionsTab />}
+                        {tab === 'diff-review' && <DiffReviewTab />}
+                        {tab === 'scan-results' && <div style={{ color: 'var(--fg-muted)' }}>Scan keywords...</div>}
+                    </div>
+                    <style>{` .act-btn { background: var(--surface-2); border: 1px solid var(--border); padding: 8px 16px; border-radius: 5px; font-size: 13px; } `}</style>
+                </div>
+            );
+        };
+
+        const FilesTab = () => (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                <textarea placeholder="AI Goal: e.g. 'More dramatic sunsets'" style={{ width: '100%', height: '80px', padding: '12px', resize: 'none' }} />
+                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                    <thead><tr style={{ borderBottom: '1px solid var(--border)' }}><th className="uppercase-label">Name</th><th className="uppercase-label">Type</th><th className="uppercase-label">Status</th></tr></thead>
+                    <tbody>
+                        {[
+                            { n: 'update.rpf', t: 'RPF', s: 'ready', c: 'var(--success)' },
+                            { n: 'timecycle_modifiers.xml', t: 'XML', s: 'scanned', c: 'var(--ai-accent)' },
+                            { n: 'visualsettings.dat', t: 'DAT', s: 'warning', c: 'var(--warning)' }
+                        ].map(f => (
+                            <tr key={f.n} style={{ borderBottom: '1px solid var(--surface-2)' }}>
+                                <td className="mono" style={{ padding: '12px 0' }}>{f.n}</td>
+                                <td><span className="mono" style={{ fontSize: '10px', background: '#222', padding: '2px 6px', borderRadius: '4px' }}>{f.t}</span></td>
+                                <td><div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><div style={{ width: '7px', height: '7px', borderRadius: '50%', background: f.c }} />{f.s}</div></td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        );
+
+        const AISuggestionsTab = () => (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {[
+                    { title: 'Enhance golden hour saturation', risk: 'low', rc: 'var(--success)', rf: 'var(--success-fill)' },
+                    { title: 'Volumetric fog adjustment', risk: 'medium', rc: 'var(--warning)', rf: 'var(--warning-fill)' }
+                ].map((s, i) => (
+                    <div key={i} style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: '8px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span className="mono" style={{ color: 'var(--fg-muted)' }}>timecycle_modifiers.xml</span>
+                            <div style={{ color: s.rc, background: s.rf, fontSize: '10px', padding: '2px 6px', borderRadius: '4px' }}>{s.risk.toUpperCase()} RISK</div>
+                        </div>
+                        <div style={{ fontWeight: 500 }}>{s.title}</div>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <button className="ai-btn">Review</button>
+                            <button className="ai-btn" style={{ color: 'var(--success)', background: 'var(--success-fill)' }}>Accept</button>
+                        </div>
+                    </div>
+                ))}
+                <style>{` .ai-btn { font-size: 12px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 5px; } `}</style>
+            </div>
+        );
+
+        const DiffReviewTab = () => (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%' }}>
+                <div style={{ display: 'flex', gap: '1px', background: 'var(--border)', flexGrow: 1, borderRadius: '8px', overflow: 'hidden' }}>
+                    <div style={{ flex: 1, background: '#111', padding: '12px' }}>
+                        <div className="uppercase-label" style={{ marginBottom: '8px' }}>Original</div>
+                        <div className="mono" style={{ fontSize: '12px', color: 'var(--fg-muted)' }}>{`<light_r>255</light_r>\n<light_g>180</light_g>`}</div>
+                    </div>
+                    <div style={{ flex: 1, background: '#111', padding: '12px' }}>
+                        <div className="uppercase-label" style={{ marginBottom: '8px' }}>Proposed</div>
+                        <div className="mono" style={{ fontSize: '12px' }}>
+                            <div style={{ background: 'rgba(192,57,43,.15)', color: 'var(--danger)' }}>{`<light_r>255</light_r>`}</div>
+                            <div style={{ background: 'rgba(29,158,117,.15)', color: 'var(--success)' }}>{`<light_r>255</light_r> <!-- AI -->`}</div>
+                        </div>
+                    </div>
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}><button className="act-btn" style={{ background: 'var(--success-fill)', color: 'var(--success)' }}>Accept All</button><button className="act-btn">Restore</button></div>
+            </div>
+        );
+
+        const Export = () => (
+            <div style={{ padding: '40px', maxWidth: '600px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                <h1 style={{ fontSize: '20px', fontWeight: 500 }}>Export Mod Package</h1>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div className="uppercase-label">Package Name</div>
+                    <input type="text" defaultValue="Redux_AI_Atmosphere_v1" style={{ padding: '12px' }} />
+                </div>
+                <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: '8px', padding: '16px' }}>
+                    <div className="uppercase-label" style={{ marginBottom: '12px' }}>Sections Included</div>
+                    {['Timecycle', 'Tracers', 'Hit Effects'].map(s => (
+                        <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '4px 0' }}>
+                            <div style={{ width: '14px', height: '14px', border: '1px solid var(--accent)', background: 'var(--accent)', borderRadius: '3px' }} />
+                            <span>{s}</span>
+                        </div>
+                    ))}
+                </div>
+                <button style={{ background: 'var(--accent)', color: 'var(--bg)', padding: '16px', borderRadius: '6px', fontWeight: 500 }}>Export Mod Package</button>
+            </div>
+        );
+
+        const Settings = () => (
+            <div style={{ padding: '40px', maxWidth: '600px', display: 'flex', flexDirection: 'column', gap: '32px' }}>
+                <h1 style={{ fontSize: '17px', fontWeight: 500 }}>Settings</h1>
+                <div>
+                    <div className="uppercase-label" style={{ borderBottom: '1px solid var(--border)', paddingBottom: '8px', marginBottom: '16px' }}>AI Provider</div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span>Primary Model</span>
+                        <select style={{ padding: '6px 12px' }}><option>Redux-LLM 4.0</option></select>
+                    </div>
+                </div>
+                <div>
+                    <div className="uppercase-label" style={{ borderBottom: '1px solid var(--border)', paddingBottom: '8px', marginBottom: '16px' }}>Safety</div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span>Create Backups</span>
+                        <div style={{ width: '34px', height: '18px', background: 'var(--accent)', borderRadius: '9px', position: 'relative' }}>
+                            <div style={{ width: '14px', height: '14px', background: 'var(--bg)', borderRadius: '50%', position: 'absolute', right: '2px', top: '2px' }} />
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const App = () => {
+            const [page, setPage] = useState('dashboard');
+            return (
+                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                    <TopBar />
+                    <div style={{ display: 'flex', flexGrow: 1, overflow: 'hidden' }}>
+                        <Sidebar activePage={page} setActivePage={setPage} />
+                        <div style={{ flexGrow: 1, backgroundColor: 'var(--bg)', overflowY: 'auto' }}>
+                            {page === 'dashboard' && <Dashboard />}
+                            {page === 'timecycle' && <Timecycle />}
+                            {page === 'export' && <Export />}
+                            {page === 'settings' && <Settings />}
+                            {['tracers', 'hit-effects', 'kill-effect', 'optimization', 'textures'].includes(page) && (
+                                <div style={{ padding: '20px', color: 'var(--fg-muted)' }}>{page.replace('-', ' ')} view is being initialized...</div>
+                            )}
+                        </div>
+                        <RightPanel />
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

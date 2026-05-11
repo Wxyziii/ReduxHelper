@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Redux AI Assistant Project",
+  "type": "object",
+  "required": [
+    "version",
+    "projectId",
+    "projectName",
+    "createdAt",
+    "updatedAt",
+    "sections"
+  ],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "projectId": {
+      "type": "string"
+    },
+    "projectName": {
+      "type": "string"
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "updatedAt": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "sections": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/section"
+      }
+    },
+    "settings": {
+      "type": "object"
+    }
+  },
+  "definitions": {
+    "section": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "files",
+        "aiRequests",
+        "patches"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/projectFile"
+          }
+        },
+        "aiRequests": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "patches": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "projectFile": {
+      "type": "object",
+      "required": [
+        "id",
+        "sourcePath",
+        "relativePath",
+        "fileName",
+        "extension",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sourcePath": {
+          "type": "string"
+        },
+        "relativePath": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "extension": {
+          "type": "string"
+        },
+        "sizeBytes": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

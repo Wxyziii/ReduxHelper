@@ -1,0 +1,34 @@
+{
+  "version": "0.1.0",
+  "projectId": "example-project",
+  "projectName": "Example Redux Project",
+  "createdAt": "2026-05-11T12:00:00Z",
+  "updatedAt": "2026-05-11T12:00:00Z",
+  "notes": "Example data for UI development.",
+  "sections": {
+    "timecycle": {
+      "id": "timecycle",
+      "name": "Timecycle",
+      "goal": "Make the atmosphere cleaner and easier to read.",
+      "files": [
+        {
+          "id": "file-001",
+          "sourcePath": "C:/example/common/data/timecycle/example.xml",
+          "relativePath": "common/data/timecycle/example.xml",
+          "fileName": "example.xml",
+          "extension": ".xml",
+          "sizeBytes": 12000,
+          "status": "text-readable",
+          "warnings": []
+        }
+      ],
+      "aiRequests": [],
+      "patches": [],
+      "warnings": []
+    }
+  },
+  "settings": {
+    "model": "openai/gpt-oss-120b:free",
+    "exportDirectory": "exports"
+  }
+}
