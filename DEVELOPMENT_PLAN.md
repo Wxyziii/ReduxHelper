@@ -1,6 +1,6 @@
 # Development Plan
 
-This prototype now includes Phase 2 local project/file support, Phase 3A prompt/AI JSON validation, Phase 3B OpenRouter request/response integration through Tauri, and Phase 4 safe workspace patch validation/apply. Keep export writing, DDS conversion, `.rpf` editing, OpenIV integration, and real mod installation disabled until their phases.
+This prototype now includes local project/file support, OpenRouter AI, safe patch validation/apply, DDS texture workflow, local ComfyUI PNG editing, manual export packages, project intelligence, stability hardening, and Phase 11 onboarding/help/docs polish. Keep direct OpenIV integration, `.rpf` editing/repacking, direct GTA install, cloud sync, and mass automatic editing disabled.
 
 ## 1. Tauri Shell
 

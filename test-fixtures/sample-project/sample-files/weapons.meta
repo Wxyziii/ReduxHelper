@@ -1,0 +1,5 @@
+<weapons>
+  <weapon name="SYNTHETIC_RIFLE">
+    <tracer value="true" />
+  </weapon>
+</weapons>

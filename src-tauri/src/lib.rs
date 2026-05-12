@@ -3,10 +3,15 @@ use std::{
   collections::HashMap,
   fs,
   path::{Path, PathBuf},
+  process::Command,
   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 use walkdir::WalkDir;
+
+pub mod errors;
+pub mod logging;
+pub mod path_safety;
 
 type CommandResult<T> = Result<T, String>;
 
@@ -47,6 +52,19 @@ struct ReduxProject {
   patches: Vec<serde_json::Value>,
   #[serde(default)]
   textures: Vec<serde_json::Value>,
+  #[serde(default)]
+  export_history: Vec<serde_json::Value>,
+  #[serde(default)]
+  image_generation_history: Vec<serde_json::Value>,
+  #[serde(default)]
+  prompt_basket: Vec<serde_json::Value>,
+  #[serde(default)]
+  diagnostics: Vec<serde_json::Value>,
+  last_indexed_at: Option<String>,
+  #[serde(default)]
+  scan_cache: serde_json::Value,
+  #[serde(default)]
+  operation_history: Vec<serde_json::Value>,
   settings: serde_json::Value,
 }
 
@@ -75,6 +93,50 @@ struct ProjectFile {
   warnings: Vec<String>,
   scan_matches: Vec<ScanMatch>,
   preview: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextureMetadata {
+  file_path: String,
+  filename: String,
+  width: Option<u32>,
+  height: Option<u32>,
+  format: Option<String>,
+  mipmap_count: Option<u32>,
+  has_alpha: Option<String>,
+  file_size_bytes: u64,
+  role_guess: String,
+  warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextureToolCheck {
+  ok: bool,
+  converter_path: String,
+  exists: bool,
+  can_run: bool,
+  version_output: Option<String>,
+  warning: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextureConversionResult {
+  success: bool,
+  texture_id: String,
+  source_path: String,
+  output_path: Option<String>,
+  metadata: Option<TextureMetadata>,
+  warnings: Vec<String>,
+  command_output: Option<String>,
+  error: Option<String>,
+}
+
+struct TextReadResult {
+  text: String,
+  warning: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -264,15 +326,24 @@ async fn import_folder(mut project: ReduxProject) -> CommandResult<ReduxProject>
 #[tauri::command]
 async fn scan_project(mut project: ReduxProject) -> CommandResult<ReduxProject> {
   ensure_project_ready(&project)?;
+  let scan_limit = max_scan_bytes(&project);
+  let line_limit = max_line_chars(&project);
+  let result_limit = max_scan_results(&project);
   for file in project.files.iter_mut() {
     file.scan_matches.clear();
     if file.status != "text-readable" {
       continue;
     }
     let path = PathBuf::from(&file.workspace_path);
-    let content = fs::read_to_string(&path).map_err(|error| format!("Failed reading {}: {error}", file.relative_path))?;
+    let read = read_text_limited(&path, scan_limit, line_limit)?;
+    let content = read.text;
     file.preview = Some(preview_text(&content));
-    file.scan_matches = scan_content(&file.relative_path, &file.section, &content);
+    let mut matches = scan_content(&file.relative_path, &file.section, &content);
+    matches.truncate(result_limit);
+    file.scan_matches = matches;
+    if let Some(warning) = read.warning {
+      file.warnings.push(warning);
+    }
   }
   project.updated_at = now_string();
   project.save_status = "Saved".to_string();
@@ -292,8 +363,275 @@ async fn export_project(_project: ReduxProject) -> CommandResult<CommandResponse
   Ok(CommandResponse {
     ok: true,
     action: "export_project",
-    message: "Phase 2 mock export only. Real copy/export writing starts in Phase 3.".to_string(),
+    message: "Use create_export_package for the Phase 6 export writer.".to_string(),
   })
+}
+
+#[tauri::command]
+async fn build_export_preview(project: ReduxProject, export_name: String, include_reports: Option<bool>, include_all_backups: Option<bool>) -> CommandResult<serde_json::Value> {
+  Ok(build_export_preview_value(&project, &export_name, include_reports.unwrap_or(true), include_all_backups.unwrap_or(false), None)?)
+}
+
+#[tauri::command]
+async fn create_export_package(
+  project: ReduxProject,
+  export_name: String,
+  include_reports: Option<bool>,
+  include_all_backups: Option<bool>,
+  conflict_strategy: Option<String>,
+) -> CommandResult<serde_json::Value> {
+  ensure_project_ready(&project)?;
+  let trimmed_name = export_name.trim();
+  if trimmed_name.is_empty() {
+    return Err("Export name is empty.".to_string());
+  }
+  let root = PathBuf::from(project.project_root.clone().ok_or_else(|| "Project missing project root.".to_string())?);
+  let exports_root = root.join("exports");
+  fs::create_dir_all(&exports_root).map_err(|error| error.to_string())?;
+  let base_export = exports_root.join(sanitize_file_name(trimmed_name));
+  let export_dir = match conflict_strategy.as_deref().unwrap_or("version") {
+    "overwrite" => {
+      if base_export.exists() {
+        fs::remove_dir_all(&base_export).map_err(|error| format!("Failed to overwrite existing export folder: {error}"))?;
+      }
+      base_export
+    }
+    "cancel" if base_export.exists() => return Err("Export folder already exists.".to_string()),
+    _ => versioned_export_path(&base_export),
+  };
+  let preview = build_export_preview_value(&project, trimmed_name, include_reports.unwrap_or(true), include_all_backups.unwrap_or(false), Some(&export_dir))?;
+  let blockers = preview.get("blockers").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+  if !blockers.is_empty() {
+    return Ok(serde_json::json!({
+      "ok": false,
+      "message": "Export blocked.",
+      "preview": preview,
+      "validation": { "ok": false, "errors": blockers, "warnings": [] }
+    }));
+  }
+  fs::create_dir_all(&export_dir).map_err(|error| error.to_string())?;
+  fs::create_dir_all(export_dir.join("edited_files")).map_err(|error| error.to_string())?;
+  fs::create_dir_all(export_dir.join("compiled_textures")).map_err(|error| error.to_string())?;
+  fs::create_dir_all(export_dir.join("original_backups")).map_err(|error| error.to_string())?;
+  fs::create_dir_all(export_dir.join("reports")).map_err(|error| error.to_string())?;
+
+  let mut exported_files = Vec::new();
+  for file in preview.get("includedFiles").and_then(|value| value.as_array()).cloned().unwrap_or_default() {
+    let source = file.get("sourceWorkspacePath").and_then(|value| value.as_str()).unwrap_or_default();
+    let output_relative = normalize_relative(file.get("outputRelativePath").and_then(|value| value.as_str()).unwrap_or_default());
+    let source_path = safe_export_source_path(&project, source)?;
+    let destination = safe_export_destination(&export_dir, &output_relative)?;
+    if let Some(parent) = destination.parent() {
+      fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::copy(&source_path, &destination).map_err(|error| format!("Failed exporting {}: {error}", source_path.display()))?;
+    let mut record = file.clone();
+    let size = fs::metadata(&destination).map_err(|error| error.to_string())?.len();
+    record["sizeBytes"] = serde_json::json!(size);
+    record["outputHash"] = serde_json::json!(file_hash(&destination)?);
+    record["sourceWorkspacePath"] = serde_json::json!(source_path.to_string_lossy());
+    exported_files.push(record);
+  }
+
+  if include_reports.unwrap_or(true) {
+    exported_files.extend(copy_project_reports(&project, &export_dir)?);
+  }
+
+  let warnings = preview.get("warnings").cloned().unwrap_or_else(|| serde_json::json!([]));
+  let export_id = preview.get("exportId").and_then(|value| value.as_str()).unwrap_or("export").to_string();
+  let manifest = build_manifest_value(&project, trimmed_name, &export_id, &export_dir, &exported_files, warnings.clone());
+  let install_notes = build_install_notes_text(trimmed_name, &exported_files, &warnings);
+  let changelog = build_export_changelog(&project, trimmed_name, &exported_files, &warnings);
+  let warnings_md = build_warnings_md(&preview);
+  write_json_file(&export_dir.join("manifest.json"), &manifest)?;
+  fs::write(export_dir.join("install_notes.txt"), install_notes).map_err(|error| error.to_string())?;
+  fs::write(export_dir.join("changelog.md"), changelog).map_err(|error| error.to_string())?;
+  fs::write(export_dir.join("warnings.md"), warnings_md).map_err(|error| error.to_string())?;
+  let validation = validate_export_dir(&export_dir, &manifest)?;
+  let summary = serde_json::json!({
+    "exportId": export_id,
+    "exportName": trimmed_name,
+    "exportPath": export_dir.to_string_lossy(),
+    "fileCount": exported_files.len(),
+    "sections": manifest["includedSections"],
+    "warningsCount": warnings.as_array().map(|value| value.len()).unwrap_or(0),
+    "validation": validation
+  });
+  write_json_file(&export_dir.join("export_summary.json"), &summary)?;
+  Ok(serde_json::json!({
+    "ok": validation.get("ok").and_then(|value| value.as_bool()).unwrap_or(false),
+    "message": "Export package created. Manual install only; no game files or archives modified.",
+    "preview": preview,
+    "validation": validation,
+    "exportPath": export_dir.to_string_lossy(),
+    "manifestPath": export_dir.join("manifest.json").to_string_lossy(),
+    "installNotesPath": export_dir.join("install_notes.txt").to_string_lossy(),
+    "summaryPath": export_dir.join("export_summary.json").to_string_lossy()
+  }))
+}
+
+#[tauri::command]
+async fn validate_export_package(_project: ReduxProject, export_path: String) -> CommandResult<serde_json::Value> {
+  let export_dir = PathBuf::from(export_path);
+  let manifest_path = export_dir.join("manifest.json");
+  let manifest_text = fs::read_to_string(&manifest_path).map_err(|error| error.to_string())?;
+  let manifest: serde_json::Value = serde_json::from_str(&manifest_text).map_err(|error| error.to_string())?;
+  Ok(validate_export_dir(&export_dir, &manifest)?)
+}
+
+#[tauri::command]
+async fn open_export_folder(export_path: String) -> CommandResult<CommandResponse> {
+  let path = PathBuf::from(export_path);
+  if !path.exists() {
+    return Err("Export folder does not exist.".to_string());
+  }
+  #[cfg(target_os = "windows")]
+  Command::new("explorer").arg(&path).spawn().map_err(|error| error.to_string())?;
+  #[cfg(target_os = "macos")]
+  Command::new("open").arg(&path).spawn().map_err(|error| error.to_string())?;
+  #[cfg(target_os = "linux")]
+  Command::new("xdg-open").arg(&path).spawn().map_err(|error| error.to_string())?;
+  Ok(CommandResponse { ok: true, action: "open_export_folder", message: "Export folder opened.".to_string() })
+}
+
+#[tauri::command]
+async fn save_install_notes(project: ReduxProject, export_name: String, content: String) -> CommandResult<CommandResponse> {
+  save_named_report(&project, &format!("install_notes_draft_{}.txt", sanitize_file_name(&export_name)), &content)?;
+  Ok(CommandResponse { ok: true, action: "save_install_notes", message: "Install notes draft saved in reports.".to_string() })
+}
+
+#[tauri::command]
+async fn save_export_manifest(project: ReduxProject, export_name: String) -> CommandResult<CommandResponse> {
+  let preview = build_export_preview_value(&project, &export_name, true, false, None)?;
+  let content = serde_json::to_string_pretty(preview.get("manifestPreview").unwrap_or(&preview)).map_err(|error| error.to_string())?;
+  save_named_report(&project, &format!("export_manifest_preview_{}.json", sanitize_file_name(&export_name)), &content)?;
+  Ok(CommandResponse { ok: true, action: "save_export_manifest", message: "Manifest preview saved in reports.".to_string() })
+}
+
+#[tauri::command]
+async fn test_comfyui_connection(project: ReduxProject) -> CommandResult<serde_json::Value> {
+  let url = comfyui_url(&project)?;
+  let client = reqwest::Client::builder()
+    .timeout(Duration::from_secs(image_ai_timeout(&project).min(30)))
+    .build()
+    .map_err(|error| error.to_string())?;
+  let response = client.get(format!("{url}/system_stats")).send().await;
+  match response {
+    Ok(value) if value.status().is_success() => Ok(serde_json::json!({ "ok": true, "provider": "comfyui", "message": "ComfyUI connection OK." })),
+    Ok(value) => Ok(serde_json::json!({ "ok": false, "provider": "comfyui", "message": format!("ComfyUI HTTP {}", value.status()) })),
+    Err(error) => Ok(serde_json::json!({ "ok": false, "provider": "comfyui", "message": format!("ComfyUI unavailable: {error}") })),
+  }
+}
+
+#[tauri::command]
+async fn list_comfyui_models(project: ReduxProject) -> CommandResult<Vec<String>> {
+  let url = comfyui_url(&project)?;
+  let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|error| error.to_string())?;
+  let response = client.get(format!("{url}/object_info/CheckpointLoaderSimple")).send().await.map_err(|error| error.to_string())?;
+  let text = response.text().await.map_err(|error| error.to_string())?;
+  let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+  let models = value
+    .pointer("/CheckpointLoaderSimple/input/required/ckpt_name/0")
+    .and_then(|item| item.as_array())
+    .map(|items| items.iter().filter_map(|item| item.as_str().map(|text| text.to_string())).collect())
+    .unwrap_or_default();
+  Ok(models)
+}
+
+#[tauri::command]
+async fn send_comfyui_image_to_image(project: ReduxProject, request: serde_json::Value) -> CommandResult<serde_json::Value> {
+  ensure_project_ready(&project)?;
+  let texture_id = request.get("textureId").and_then(|value| value.as_str()).ok_or_else(|| "Missing textureId.".to_string())?;
+  let source = request.get("sourcePngPath").and_then(|value| value.as_str()).ok_or_else(|| "Missing source PNG path.".to_string())?;
+  let source_path = safe_workspace_path_str(&project, source)?;
+  if !source_path.exists() {
+    return Err("Source preview PNG missing.".to_string());
+  }
+  let (source_width, source_height, source_alpha) = inspect_png_basic(&source_path).ok_or_else(|| "Source preview PNG cannot be inspected.".to_string())?;
+  let prompt = request.get("prompt").and_then(|value| value.as_str()).unwrap_or("");
+  if prompt.trim().is_empty() {
+    return Err("Image edit prompt is empty.".to_string());
+  }
+  let negative = request.get("negativePrompt").and_then(|value| value.as_str()).unwrap_or("");
+  let seed = request.get("seed").and_then(|value| value.as_i64()).unwrap_or_else(|| epoch_seconds() as i64);
+  let provider = "comfyui";
+  let url = comfyui_url(&project)?;
+  let output_dir = image_ai_output_dir(&project)?;
+  fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+  let mut warnings = Vec::new();
+  let output_id = format!("imgai-{}", epoch_millis());
+
+  let generated = match comfyui_generate(&project, &url, &source_path, &request, &output_dir, &output_id).await {
+    Ok(path) => path,
+    Err(error) => {
+      let metadata_path = write_image_ai_metadata(&project, &output_id, texture_id, None, &request, &[error.clone()], "failed")?;
+      return Ok(serde_json::json!({
+        "success": false,
+        "textureId": texture_id,
+        "provider": provider,
+        "prompt": prompt,
+        "negativePrompt": negative,
+        "seed": seed,
+        "settingsUsed": project.settings.get("imageAi").cloned().unwrap_or_default(),
+        "metadataPath": metadata_path,
+        "warnings": [error],
+        "error": "ComfyUI image generation failed."
+      }));
+    }
+  };
+
+  if let Some((width, height, alpha)) = inspect_png_basic(&generated) {
+    if width != source_width || height != source_height {
+      warnings.push(format!("AI output dimensions {width}x{height} differ from source {source_width}x{source_height}."));
+    }
+    if source_alpha && !alpha {
+      warnings.push("Source PNG had alpha but AI output appears to have no alpha.".to_string());
+    }
+  } else {
+    warnings.push("Generated PNG cannot be inspected.".to_string());
+  }
+  let metadata_path = write_image_ai_metadata(&project, &output_id, texture_id, Some(&generated), &request, &warnings, "generated")?;
+  Ok(serde_json::json!({
+    "success": true,
+    "textureId": texture_id,
+    "outputPngPath": generated.to_string_lossy(),
+    "provider": provider,
+    "prompt": prompt,
+    "negativePrompt": negative,
+    "seed": seed,
+    "settingsUsed": project.settings.get("imageAi").cloned().unwrap_or_default(),
+    "metadataPath": metadata_path,
+    "warnings": warnings,
+    "output": {
+      "outputId": output_id,
+      "textureId": texture_id,
+      "outputPath": generated.to_string_lossy(),
+      "prompt": prompt,
+      "negativePrompt": negative,
+      "seed": seed,
+      "provider": provider,
+      "createdAt": now_string(),
+      "settingsUsed": project.settings.get("imageAi").cloned().unwrap_or_default(),
+      "warnings": warnings,
+      "status": "generated",
+      "metadataPath": metadata_path
+    }
+  }))
+}
+
+#[tauri::command]
+async fn get_comfyui_job_status(job_id: String) -> CommandResult<serde_json::Value> {
+  Ok(serde_json::json!({ "jobId": job_id, "status": "unknown", "progress": 0, "message": "Long-running job status is not persisted yet." }))
+}
+
+#[tauri::command]
+async fn download_comfyui_output(_project: ReduxProject, output: serde_json::Value) -> CommandResult<serde_json::Value> {
+  Ok(serde_json::json!({ "ok": false, "message": "Use send_comfyui_image_to_image; it downloads output automatically.", "output": output }))
+}
+
+#[tauri::command]
+async fn cancel_comfyui_job(job_id: String) -> CommandResult<CommandResponse> {
+  Ok(CommandResponse { ok: true, action: "cancel_comfyui_job", message: format!("Stopped tracking ComfyUI job {job_id}. ComfyUI may continue processing.") })
 }
 
 #[tauri::command]
@@ -313,6 +651,245 @@ async fn save_ai_response_report(project: ReduxProject, section: String, content
     ok: true,
     action: "save_ai_response_report",
     message: "AI response report saved under project reports folder.".to_string(),
+  })
+}
+
+#[tauri::command]
+async fn inspect_dds_metadata(project: ReduxProject, texture_id: String) -> CommandResult<TextureMetadata> {
+  inspect_texture_by_id(&project, &texture_id)
+}
+
+#[tauri::command]
+async fn inspect_texture_metadata(project: ReduxProject, texture_id: String) -> CommandResult<TextureMetadata> {
+  inspect_texture_by_id(&project, &texture_id)
+}
+
+#[tauri::command]
+async fn check_texture_tools(project: ReduxProject) -> CommandResult<TextureToolCheck> {
+  let converter_path = texture_converter_path(&project);
+  if converter_path.trim().is_empty() {
+    return Ok(TextureToolCheck {
+      ok: false,
+      converter_path,
+      exists: false,
+      can_run: false,
+      version_output: None,
+      warning: Some("No texture converter path configured. Set texconv in Settings.".to_string()),
+    });
+  }
+  let exists = Path::new(&converter_path).exists();
+  let output = if exists {
+    Command::new(&converter_path).arg("-?").output().ok()
+  } else {
+    None
+  };
+  let can_run = output.is_some();
+  let version_output = output.map(|value| {
+    let mut text = String::from_utf8_lossy(&value.stdout).to_string();
+    if text.trim().is_empty() {
+      text = String::from_utf8_lossy(&value.stderr).to_string();
+    }
+    text.chars().take(800).collect()
+  });
+  Ok(TextureToolCheck {
+    ok: exists && can_run,
+    converter_path,
+    exists,
+    can_run,
+    version_output,
+    warning: if exists && can_run { None } else { Some("Converter path does not exist or cannot run.".to_string()) },
+  })
+}
+
+#[tauri::command]
+async fn convert_dds_to_png(project: ReduxProject, texture_id: String) -> CommandResult<TextureConversionResult> {
+  ensure_project_ready(&project)?;
+  let texture = texture_by_id(&project, &texture_id)?;
+  let source = safe_workspace_path_str(&project, texture.get("workspacePath").and_then(|v| v.as_str()).unwrap_or_default())?;
+  let metadata = inspect_texture_path(&source)?;
+  let preview_dir = texture_cache_dir(&project, "texture-previews")?;
+  fs::create_dir_all(&preview_dir).map_err(|error| error.to_string())?;
+  let converter = texture_converter_path(&project);
+  if converter.trim().is_empty() || !Path::new(&converter).exists() {
+    return Ok(TextureConversionResult {
+      success: false,
+      texture_id,
+      source_path: source.to_string_lossy().to_string(),
+      output_path: None,
+      metadata: Some(metadata),
+      warnings: vec!["Real DDS to PNG conversion requires a configured texconv path.".to_string()],
+      command_output: None,
+      error: Some("Converter path missing or invalid.".to_string()),
+    });
+  }
+  let output = Command::new(&converter)
+    .args(["-ft", "PNG", "-y", "-o"])
+    .arg(&preview_dir)
+    .arg(&source)
+    .output()
+    .map_err(|error| error.to_string())?;
+  let command_text = command_output_text(&output);
+  let expected = preview_dir.join(source.file_stem().unwrap_or_default()).with_extension("png");
+  let success = output.status.success() && expected.exists();
+  Ok(TextureConversionResult {
+    success,
+    texture_id,
+    source_path: source.to_string_lossy().to_string(),
+    output_path: success.then(|| expected.to_string_lossy().to_string()),
+    metadata: Some(metadata),
+    warnings: if success { Vec::new() } else { vec!["DDS preview output was not created.".to_string()] },
+    command_output: Some(command_text),
+    error: if success { None } else { Some("DDS to PNG conversion failed.".to_string()) },
+  })
+}
+
+#[tauri::command]
+async fn import_edited_texture_png(project: ReduxProject, texture_id: String) -> CommandResult<TextureConversionResult> {
+  ensure_project_ready(&project)?;
+  let texture = texture_by_id(&project, &texture_id)?;
+  let Some(picked) = rfd::FileDialog::new().add_filter("PNG image", &["png"]).set_title("Import edited texture PNG").pick_file() else {
+    return Ok(TextureConversionResult {
+      success: false,
+      texture_id,
+      source_path: String::new(),
+      output_path: None,
+      metadata: None,
+      warnings: Vec::new(),
+      command_output: None,
+      error: Some("No edited PNG selected.".to_string()),
+    });
+  };
+  let edit_dir = texture_cache_dir(&project, "texture-edits")?;
+  fs::create_dir_all(&edit_dir).map_err(|error| error.to_string())?;
+  let file_stem = texture.get("fileName").and_then(|v| v.as_str()).unwrap_or("texture.dds").trim_end_matches(".dds");
+  let destination = unique_path(edit_dir.join(format!("{file_stem}_edited.png")));
+  fs::copy(&picked, &destination).map_err(|error| error.to_string())?;
+  let mut warnings = Vec::new();
+  let original = texture.get("metadata").and_then(|value| serde_json::from_value::<TextureMetadata>(value.clone()).ok());
+  if let Some((width, height, alpha)) = inspect_png_basic(&destination) {
+    if let Some(meta) = original.as_ref() {
+      if meta.width != Some(width) || meta.height != Some(height) {
+        warnings.push(format!("Edited PNG dimensions are {width}x{height}; original DDS is {}x{}.", meta.width.unwrap_or(0), meta.height.unwrap_or(0)));
+      }
+      if meta.has_alpha.as_deref() == Some("yes") && !alpha {
+        warnings.push("Original DDS appears to have alpha but edited PNG has no alpha channel.".to_string());
+      }
+    }
+  } else {
+    warnings.push("Edited PNG dimensions/alpha could not be inspected.".to_string());
+  }
+  Ok(TextureConversionResult {
+    success: true,
+    texture_id,
+    source_path: picked.to_string_lossy().to_string(),
+    output_path: Some(destination.to_string_lossy().to_string()),
+    metadata: original,
+    warnings,
+    command_output: None,
+    error: None,
+  })
+}
+
+#[tauri::command]
+async fn convert_png_to_dds(project: ReduxProject, texture_id: String, allow_dimension_mismatch: Option<bool>) -> CommandResult<TextureConversionResult> {
+  ensure_project_ready(&project)?;
+  let texture = texture_by_id(&project, &texture_id)?;
+  let edited = texture
+    .get("editedPngPath")
+    .and_then(|value| value.as_str())
+    .filter(|value| !value.trim().is_empty())
+    .ok_or_else(|| "No edited PNG is attached to this texture.".to_string())?;
+  let edited_path = safe_workspace_path_str(&project, edited)?;
+  if !edited_path.exists() {
+    return Err("Edited PNG is missing from workspace.".to_string());
+  }
+  let original_meta = texture.get("metadata").and_then(|value| serde_json::from_value::<TextureMetadata>(value.clone()).ok());
+  let mut warnings = Vec::new();
+  if let Some((width, height, alpha)) = inspect_png_basic(&edited_path) {
+    if let Some(meta) = original_meta.as_ref() {
+      let mismatch = meta.width != Some(width) || meta.height != Some(height);
+      if mismatch {
+        warnings.push(format!("PNG dimensions {width}x{height} differ from original DDS {}x{}.", meta.width.unwrap_or(0), meta.height.unwrap_or(0)));
+        if !allow_dimension_mismatch.unwrap_or(false) {
+          return Ok(TextureConversionResult {
+            success: false,
+            texture_id,
+            source_path: edited_path.to_string_lossy().to_string(),
+            output_path: None,
+            metadata: original_meta,
+            warnings,
+            command_output: None,
+            error: Some("Dimension mismatch requires explicit confirmation.".to_string()),
+          });
+        }
+      }
+      if meta.has_alpha.as_deref() == Some("yes") && !alpha {
+        warnings.push("Original DDS had alpha but edited PNG appears to have no alpha.".to_string());
+      }
+    }
+  } else {
+    warnings.push("Edited PNG metadata could not be inspected before DDS compile.".to_string());
+  }
+  let converter = texture_converter_path(&project);
+  if converter.trim().is_empty() || !Path::new(&converter).exists() {
+    return Ok(TextureConversionResult {
+      success: false,
+      texture_id,
+      source_path: edited_path.to_string_lossy().to_string(),
+      output_path: None,
+      metadata: original_meta,
+      warnings: [warnings, vec!["Real PNG to DDS conversion requires a configured texconv path.".to_string()]].concat(),
+      command_output: None,
+      error: Some("Converter path missing or invalid.".to_string()),
+    });
+  }
+  let compiled_dir = texture_cache_dir(&project, "texture-compiled")?;
+  fs::create_dir_all(&compiled_dir).map_err(|error| error.to_string())?;
+  let original_name = texture.get("fileName").and_then(|value| value.as_str()).unwrap_or("texture.dds");
+  let output_path = unique_path(compiled_dir.join(original_name));
+  let out_dir = output_path.parent().ok_or_else(|| "Compiled output has no parent folder.".to_string())?;
+  let format = texture_output_format(&project, original_meta.as_ref());
+  let generate_mipmaps = texture_bool_setting(&project, "generateMipmaps", true);
+  if texture_bool_setting(&project, "preserveOriginalFormat", true) && original_meta.as_ref().and_then(|meta| meta.format.as_ref()).is_none() {
+    warnings.push("Original DDS format metadata cannot be preserved; falling back to configured default DDS format.".to_string());
+  }
+  if original_meta.as_ref().and_then(|meta| meta.mipmap_count).unwrap_or(1) > 1 && !generate_mipmaps {
+    warnings.push("Original DDS had mipmaps but mipmap generation is disabled.".to_string());
+  }
+  let mip_arg = if generate_mipmaps { "0" } else { "1" };
+  let output = Command::new(&converter)
+    .args(["-y", "-f", &format, "-m", mip_arg, "-o"])
+    .arg(out_dir)
+    .arg(&edited_path)
+    .output()
+    .map_err(|error| error.to_string())?;
+  let command_text = command_output_text(&output);
+  let produced = out_dir.join(edited_path.file_stem().unwrap_or_default()).with_extension("dds");
+  let success = output.status.success() && produced.exists();
+  if success && produced != output_path {
+    fs::rename(&produced, &output_path).map_err(|error| error.to_string())?;
+  }
+  let compiled_meta = if success { inspect_texture_path(&output_path).ok().or(original_meta) } else { original_meta };
+  Ok(TextureConversionResult {
+    success,
+    texture_id,
+    source_path: edited_path.to_string_lossy().to_string(),
+    output_path: success.then(|| output_path.to_string_lossy().to_string()),
+    metadata: compiled_meta,
+    warnings,
+    command_output: Some(command_text),
+    error: if success { None } else { Some("PNG to DDS conversion failed.".to_string()) },
+  })
+}
+
+#[tauri::command]
+async fn save_texture_report(project: ReduxProject, notes: Option<String>) -> CommandResult<CommandResponse> {
+  let content = build_texture_report(&project, notes.unwrap_or_default());
+  save_named_report(&project, &format!("texture_report_{}.md", epoch_seconds()), &content)?;
+  Ok(CommandResponse {
+    ok: true,
+    action: "save_texture_report",
+    message: "Texture report saved under project reports folder.".to_string(),
   })
 }
 
@@ -417,6 +994,22 @@ async fn read_workspace_file(project: ReduxProject, relative_path: String) -> Co
 }
 
 #[tauri::command]
+async fn reveal_in_file_manager(path: String) -> CommandResult<CommandResponse> {
+  let target = PathBuf::from(path);
+  let reveal = if target.is_file() { target.parent().map(|p| p.to_path_buf()).unwrap_or(target) } else { target };
+  if !reveal.exists() {
+    return Err("Path does not exist.".to_string());
+  }
+  #[cfg(target_os = "windows")]
+  Command::new("explorer").arg(&reveal).spawn().map_err(|error| error.to_string())?;
+  #[cfg(target_os = "macos")]
+  Command::new("open").arg(&reveal).spawn().map_err(|error| error.to_string())?;
+  #[cfg(target_os = "linux")]
+  Command::new("xdg-open").arg(&reveal).spawn().map_err(|error| error.to_string())?;
+  Ok(CommandResponse { ok: true, action: "reveal_in_file_manager", message: "Path revealed.".to_string() })
+}
+
+#[tauri::command]
 async fn write_workspace_file(project: ReduxProject, relative_path: String, content: String) -> CommandResult<CommandResponse> {
   let file = project
     .files
@@ -517,6 +1110,13 @@ fn new_project(project_name: &str, project_root: &Path) -> ReduxProject {
     ai_responses: Vec::new(),
     patches: Vec::new(),
     textures: Vec::new(),
+    export_history: Vec::new(),
+    image_generation_history: Vec::new(),
+    prompt_basket: Vec::new(),
+    diagnostics: Vec::new(),
+    last_indexed_at: Some(now_string()),
+    scan_cache: serde_json::json!({}),
+    operation_history: Vec::new(),
     settings: serde_json::json!({
       "aiProvider": "OpenRouter-compatible",
       "apiKey": "",
@@ -534,6 +1134,31 @@ fn new_project(project_name: &str, project_root: &Path) -> ReduxProject {
         "imageToDds": "",
         "metadataInspector": ""
       },
+      "textureTools": {
+        "converterPath": "",
+        "defaultDdsFormat": "BC7_UNORM",
+        "generateMipmaps": true,
+        "preserveOriginalFormat": true,
+        "preserveAlpha": true,
+        "backupBeforeReplace": true,
+        "previewFolder": ".redux-ai/texture-previews"
+      },
+      "imageAi": {
+        "provider": "manual",
+        "comfyuiUrl": "http://127.0.0.1:8188",
+        "workflowPreset": "img2img_basic",
+        "outputFolder": ".redux-ai/image-ai",
+        "seedMode": "random",
+        "fixedSeed": 123456,
+        "steps": 24,
+        "cfg": 6.0,
+        "denoise": 0.45,
+        "sampler": "euler",
+        "checkpoint": "",
+        "timeoutSeconds": 180,
+        "saveRawWorkflowJson": true,
+        "saveGenerationMetadata": true
+      },
       "safety": {
         "createBackups": true,
         "validatePatchTargets": true,
@@ -544,6 +1169,17 @@ fn new_project(project_name: &str, project_root: &Path) -> ReduxProject {
       "experimental": {
         "imageWorkflow": false,
         "batchTextures": false
+      },
+      "logging": {
+        "debugLogging": false,
+        "retentionLimit": 250
+      },
+      "limits": {
+        "maxPreviewBytes": 262144,
+        "maxScanBytes": 2097152,
+        "maxLinePreviewChars": 240,
+        "maxScanResults": 500,
+        "maxPromptChars": 12000
       }
     }),
   }
@@ -558,6 +1194,7 @@ fn default_sections() -> HashMap<String, ProjectSection> {
     ("killEffect", "Kill Effect", "Script or overlay concepts only when supported by a safe scriptable setup."),
     ("optimization", "Optimization", "Risk-ranked scans for clutter and performance-heavy visual assets."),
     ("textures", "Textures", "DDS -> PNG preview -> AI/manual edit -> DDS export workflow."),
+    ("intelligence", "Intelligence", "Global search, indexing, prompt basket, relationships, diagnostics, and project health."),
     ("export", "Export", "Review accepted changes and create a safe output folder with backups and manifest."),
     ("settings", "Settings", "AI provider, model, export folder, converter paths, and safety controls."),
   ]
@@ -603,7 +1240,7 @@ fn import_one_file(project: &mut ReduxProject, source: &Path, relative_path: &st
     warnings.push("Re-import replaced previous workspace copy metadata.".to_string());
   }
   let preview = if status == "text-readable" {
-    fs::read_to_string(&destination).ok().map(|content| preview_text(&content))
+    read_text_limited(&destination, 262_144, 240).ok().map(|content| preview_text(&content.text))
   } else {
     None
   };
@@ -612,16 +1249,19 @@ fn import_one_file(project: &mut ReduxProject, source: &Path, relative_path: &st
     id: format!("file-{}", epoch_millis()),
     source_path: source.to_string_lossy().to_string(),
     workspace_path: destination.to_string_lossy().to_string(),
-    relative_path: safe_relative,
-    file_name,
-    extension,
+    relative_path: safe_relative.clone(),
+    file_name: file_name.clone(),
+    extension: extension.clone(),
     size_bytes: metadata.len(),
     status,
     section,
-    warnings,
+    warnings: warnings.clone(),
     scan_matches: Vec::new(),
     preview,
   });
+  if is_texture_extension(&extension) {
+    upsert_texture_asset(project, source, &destination, &safe_relative, &file_name, &extension, metadata.len(), &warnings);
+  }
   project.updated_at = now_string();
   project.save_status = "Saved".to_string();
   Ok(())
@@ -630,7 +1270,8 @@ fn import_one_file(project: &mut ReduxProject, source: &Path, relative_path: &st
 fn detect_status(extension: &str) -> String {
   match extension {
     ".xml" | ".dat" | ".meta" | ".ini" | ".txt" | ".json" | ".cfg" => "text-readable",
-    ".rpf" | ".ytd" | ".ypt" | ".ydr" | ".ydd" | ".awc" | ".dds" => "binary-unsupported",
+    ".dds" | ".png" | ".tga" | ".jpg" | ".jpeg" | ".webp" => "texture-workflow",
+    ".rpf" | ".ytd" | ".ypt" | ".ydr" | ".ydd" | ".awc" => "binary-unsupported",
     _ => "unsupported",
   }
   .to_string()
@@ -638,7 +1279,7 @@ fn detect_status(extension: &str) -> String {
 
 fn classify_section(relative_path: &str, extension: &str) -> String {
   let text = relative_path.to_ascii_lowercase();
-  if extension == ".dds" || contains_any(&text, &["texture", ".ytd", "diffuse", "normal", "spec", "alpha", "mipmap", "road"]) {
+  if is_texture_extension(extension) || contains_any(&text, &["texture", ".ytd", "diffuse", "normal", "spec", "alpha", "mipmap", "road"]) {
     return "textures".to_string();
   }
   if contains_any(&text, &["script", "kill", "overlay", "nui"]) {
@@ -661,12 +1302,443 @@ fn classify_section(relative_path: &str, extension: &str) -> String {
 
 fn detect_warnings(extension: &str, status: &str) -> Vec<String> {
   let mut warnings = Vec::new();
-  if status == "binary-unsupported" {
+  if status == "texture-workflow" {
+    warnings.push(format!("{extension} is tracked by the texture workflow. Original source file will not be modified."));
+  } else if status == "binary-unsupported" {
     warnings.push(format!("{extension} is binary/unsupported in Phase 2. File is copied but not read or edited."));
   } else if status == "unsupported" {
     warnings.push(format!("{extension} is not supported yet. File is copied for tracking only."));
   }
   warnings
+}
+
+fn is_texture_extension(extension: &str) -> bool {
+  matches!(extension, ".dds" | ".png" | ".tga" | ".jpg" | ".jpeg" | ".webp")
+}
+
+fn upsert_texture_asset(project: &mut ReduxProject, source: &Path, destination: &Path, relative_path: &str, file_name: &str, extension: &str, size: u64, file_warnings: &[String]) {
+  if extension != ".dds" {
+    return;
+  }
+  let role = guess_texture_role(relative_path);
+  let mut metadata = inspect_texture_path(destination).unwrap_or(TextureMetadata {
+    file_path: destination.to_string_lossy().to_string(),
+    filename: file_name.to_string(),
+    width: None,
+    height: None,
+    format: None,
+    mipmap_count: None,
+    has_alpha: Some("unknown".to_string()),
+    file_size_bytes: size,
+    role_guess: role.clone(),
+    warnings: texture_role_warnings(&role),
+  });
+  metadata.warnings = texture_metadata_warnings(&metadata);
+  let warnings = unique_strings([file_warnings.to_vec(), texture_role_warnings(&role), metadata.warnings.clone()].concat());
+  project.textures.retain(|value| value.get("relativePath").and_then(|v| v.as_str()) != Some(relative_path));
+  project.textures.push(serde_json::json!({
+    "textureId": format!("texture-{}", epoch_millis()),
+    "section": "textures",
+    "originalPath": source.to_string_lossy(),
+    "workspacePath": destination.to_string_lossy(),
+    "relativePath": relative_path,
+    "fileName": file_name,
+    "metadata": metadata,
+    "roleGuess": role,
+    "warnings": warnings,
+    "conversionStatus": "metadata_ready",
+    "exportReady": false,
+    "notes": "Imported DDS copied into the project workspace. Original source file untouched."
+  }));
+}
+
+fn texture_by_id(project: &ReduxProject, texture_id: &str) -> CommandResult<serde_json::Value> {
+  project
+    .textures
+    .iter()
+    .find(|value| value.get("textureId").and_then(|v| v.as_str()) == Some(texture_id))
+    .cloned()
+    .ok_or_else(|| "Texture record not found in project.json.".to_string())
+}
+
+fn inspect_texture_by_id(project: &ReduxProject, texture_id: &str) -> CommandResult<TextureMetadata> {
+  let texture = texture_by_id(project, texture_id)?;
+  let path = texture
+    .get("workspacePath")
+    .and_then(|value| value.as_str())
+    .ok_or_else(|| "Texture has no workspace path.".to_string())?;
+  let path = safe_workspace_path_str(project, path)?;
+  inspect_texture_path(&path)
+}
+
+fn inspect_texture_path(path: &Path) -> CommandResult<TextureMetadata> {
+  let file_size_bytes = fs::metadata(path).map_err(|error| error.to_string())?.len();
+  let filename = path.file_name().map(|v| v.to_string_lossy().to_string()).unwrap_or_else(|| "texture".to_string());
+  let role_guess = guess_texture_role(&path.to_string_lossy());
+  let mut metadata = if path.extension().map(|v| v.to_string_lossy().to_ascii_lowercase()) == Some("dds".to_string()) {
+    inspect_dds_basic(path, &filename, file_size_bytes, &role_guess)?
+  } else if path.extension().map(|v| v.to_string_lossy().to_ascii_lowercase()) == Some("png".to_string()) {
+    let (width, height, alpha) = inspect_png_basic(path).unwrap_or((0, 0, false));
+    TextureMetadata {
+      file_path: path.to_string_lossy().to_string(),
+      filename,
+      width: (width > 0).then_some(width),
+      height: (height > 0).then_some(height),
+      format: Some(if alpha { "PNG RGBA".to_string() } else { "PNG RGB".to_string() }),
+      mipmap_count: Some(1),
+      has_alpha: Some(if alpha { "yes".to_string() } else { "no".to_string() }),
+      file_size_bytes,
+      role_guess,
+      warnings: Vec::new(),
+    }
+  } else {
+    TextureMetadata {
+      file_path: path.to_string_lossy().to_string(),
+      filename,
+      width: None,
+      height: None,
+      format: None,
+      mipmap_count: None,
+      has_alpha: Some("unknown".to_string()),
+      file_size_bytes,
+      role_guess,
+      warnings: vec!["Unsupported texture metadata format.".to_string()],
+    }
+  };
+  metadata.warnings = texture_metadata_warnings(&metadata);
+  Ok(metadata)
+}
+
+fn inspect_dds_basic(path: &Path, filename: &str, file_size_bytes: u64, role_guess: &str) -> CommandResult<TextureMetadata> {
+  let bytes = fs::read(path).map_err(|error| error.to_string())?;
+  if bytes.len() < 128 || &bytes[0..4] != b"DDS " {
+    return Err("Corrupt DDS or unsupported DDS header.".to_string());
+  }
+  let height = read_u32_le(&bytes, 12);
+  let width = read_u32_le(&bytes, 16);
+  let mipmap_count = read_u32_le(&bytes, 28);
+  let fourcc = String::from_utf8_lossy(&bytes[84..88]).trim_matches(char::from(0)).to_string();
+  let rgb_bits = read_u32_le(&bytes, 88);
+  let caps_alpha = read_u32_le(&bytes, 80) & 0x1 != 0;
+  let format = if fourcc.is_empty() {
+    if rgb_bits > 0 { format!("Uncompressed {rgb_bits}-bit") } else { "DDS unknown".to_string() }
+  } else {
+    fourcc
+  };
+  Ok(TextureMetadata {
+    file_path: path.to_string_lossy().to_string(),
+    filename: filename.to_string(),
+    width: (width > 0).then_some(width),
+    height: (height > 0).then_some(height),
+    format: Some(format),
+    mipmap_count: Some(if mipmap_count == 0 { 1 } else { mipmap_count }),
+    has_alpha: Some(if caps_alpha || rgb_bits == 32 { "yes".to_string() } else { "unknown".to_string() }),
+    file_size_bytes,
+    role_guess: role_guess.to_string(),
+    warnings: texture_role_warnings(role_guess),
+  })
+}
+
+fn inspect_png_basic(path: &Path) -> Option<(u32, u32, bool)> {
+  let bytes = fs::read(path).ok()?;
+  if bytes.len() < 33 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+    return None;
+  }
+  let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+  let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+  let color_type = bytes[25];
+  Some((width, height, matches!(color_type, 4 | 6)))
+}
+
+fn comfyui_url(project: &ReduxProject) -> CommandResult<String> {
+  let url = project
+    .settings
+    .get("imageAi")
+    .and_then(|value| value.get("comfyuiUrl"))
+    .and_then(|value| value.as_str())
+    .unwrap_or("http://127.0.0.1:8188")
+    .trim()
+    .trim_end_matches('/')
+    .to_string();
+  if !url.starts_with("http://") && !url.starts_with("https://") {
+    return Err("Invalid ComfyUI URL. Use http://host:port.".to_string());
+  }
+  Ok(url)
+}
+
+fn image_ai_timeout(project: &ReduxProject) -> u64 {
+  project
+    .settings
+    .get("imageAi")
+    .and_then(|value| value.get("timeoutSeconds"))
+    .and_then(|value| value.as_u64())
+    .unwrap_or(180)
+}
+
+fn image_ai_output_dir(project: &ReduxProject) -> CommandResult<PathBuf> {
+  let workspace = PathBuf::from(project.workspace_path.clone().ok_or_else(|| "Project missing workspace path.".to_string())?);
+  let folder = project
+    .settings
+    .get("imageAi")
+    .and_then(|value| value.get("outputFolder"))
+    .and_then(|value| value.as_str())
+    .unwrap_or(".redux-ai/image-ai");
+  Ok(workspace.join(normalize_relative(folder)))
+}
+
+async fn comfyui_generate(project: &ReduxProject, url: &str, source_path: &Path, request: &serde_json::Value, output_dir: &Path, output_id: &str) -> CommandResult<PathBuf> {
+  let client = reqwest::Client::builder()
+    .timeout(Duration::from_secs(image_ai_timeout(project)))
+    .build()
+    .map_err(|error| error.to_string())?;
+  let image_name = format!("{output_id}_source.png");
+  let bytes = fs::read(source_path).map_err(|error| error.to_string())?;
+  let part = reqwest::multipart::Part::bytes(bytes).file_name(image_name.clone()).mime_str("image/png").map_err(|error| error.to_string())?;
+  let form = reqwest::multipart::Form::new().part("image", part).text("type", "input");
+  let upload = client.post(format!("{url}/upload/image")).multipart(form).send().await.map_err(|error| format!("Image upload failed: {error}"))?;
+  if !upload.status().is_success() {
+    return Err(format!("Image upload failed: HTTP {}", upload.status()));
+  }
+  let workflow = build_comfyui_workflow(project, request, &image_name);
+  if project.settings.get("imageAi").and_then(|v| v.get("saveRawWorkflowJson")).and_then(|v| v.as_bool()).unwrap_or(true) {
+    write_json_file(&output_dir.join(format!("{output_id}_workflow.json")), &workflow)?;
+  }
+  let prompt_response = client.post(format!("{url}/prompt")).json(&serde_json::json!({ "prompt": workflow })).send().await.map_err(|error| format!("Workflow submit failed: {error}"))?;
+  let prompt_text = prompt_response.text().await.map_err(|error| error.to_string())?;
+  let prompt_value: serde_json::Value = serde_json::from_str(&prompt_text).map_err(|_| format!("Invalid ComfyUI prompt response: {prompt_text}"))?;
+  let prompt_id = prompt_value.get("prompt_id").and_then(|value| value.as_str()).ok_or_else(|| format!("ComfyUI did not return prompt_id: {prompt_text}"))?;
+  let started = Instant::now();
+  let timeout = Duration::from_secs(image_ai_timeout(project));
+  loop {
+    if started.elapsed() > timeout {
+      return Err("ComfyUI generation timed out.".to_string());
+    }
+    std::thread::sleep(Duration::from_millis(900));
+    let history_response = client.get(format!("{url}/history/{prompt_id}")).send().await.map_err(|error| format!("History poll failed: {error}"))?;
+    let history_text = history_response.text().await.map_err(|error| error.to_string())?;
+    let history: serde_json::Value = serde_json::from_str(&history_text).unwrap_or_default();
+    let Some(entry) = history.get(prompt_id) else {
+      continue;
+    };
+    if let Some(outputs) = entry.get("outputs").and_then(|value| value.as_object()) {
+      for output in outputs.values() {
+        if let Some(images) = output.get("images").and_then(|value| value.as_array()) {
+          if let Some(image) = images.first() {
+            let filename = image.get("filename").and_then(|value| value.as_str()).ok_or_else(|| "ComfyUI output missing filename.".to_string())?;
+            let subfolder = image.get("subfolder").and_then(|value| value.as_str()).unwrap_or("");
+            let image_type = image.get("type").and_then(|value| value.as_str()).unwrap_or("output");
+            let view_url = format!("{url}/view?filename={}&subfolder={}&type={}", url_escape(filename), url_escape(subfolder), url_escape(image_type));
+            let image_bytes = client.get(view_url).send().await.map_err(|error| format!("Output download failed: {error}"))?.bytes().await.map_err(|error| error.to_string())?;
+            let destination = output_dir.join(format!("{output_id}.png"));
+            fs::write(&destination, image_bytes).map_err(|error| error.to_string())?;
+            return Ok(destination);
+          }
+        }
+      }
+    }
+    if entry.get("status").and_then(|s| s.get("status_str")).and_then(|value| value.as_str()) == Some("error") {
+      return Err("ComfyUI workflow execution failed.".to_string());
+    }
+  }
+}
+
+fn build_comfyui_workflow(project: &ReduxProject, request: &serde_json::Value, image_name: &str) -> serde_json::Value {
+  let settings = project.settings.get("imageAi").cloned().unwrap_or_default();
+  let checkpoint = request.get("checkpoint").and_then(|v| v.as_str()).or_else(|| settings.get("checkpoint").and_then(|v| v.as_str())).unwrap_or("");
+  let sampler = settings.get("sampler").and_then(|v| v.as_str()).unwrap_or("euler");
+  let prompt = request.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+  let negative = request.get("negativePrompt").and_then(|v| v.as_str()).unwrap_or("");
+  let seed = request.get("seed").and_then(|v| v.as_i64()).unwrap_or(epoch_seconds() as i64);
+  let steps = request.get("steps").and_then(|v| v.as_i64()).unwrap_or(24);
+  let cfg = request.get("cfg").and_then(|v| v.as_f64()).unwrap_or(6.0);
+  let denoise = request.get("strength").and_then(|v| v.as_f64()).unwrap_or(0.45);
+  serde_json::json!({
+    "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": checkpoint } },
+    "2": { "class_type": "LoadImage", "inputs": { "image": image_name } },
+    "3": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["1", 1] } },
+    "4": { "class_type": "CLIPTextEncode", "inputs": { "text": negative, "clip": ["1", 1] } },
+    "5": { "class_type": "VAEEncode", "inputs": { "pixels": ["2", 0], "vae": ["1", 2] } },
+    "6": { "class_type": "KSampler", "inputs": { "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": sampler, "scheduler": "normal", "denoise": denoise, "model": ["1", 0], "positive": ["3", 0], "negative": ["4", 0], "latent_image": ["5", 0] } },
+    "7": { "class_type": "VAEDecode", "inputs": { "samples": ["6", 0], "vae": ["1", 2] } },
+    "8": { "class_type": "SaveImage", "inputs": { "filename_prefix": "redux_ai_texture", "images": ["7", 0] } }
+  })
+}
+
+fn write_image_ai_metadata(project: &ReduxProject, output_id: &str, texture_id: &str, output_path: Option<&Path>, request: &serde_json::Value, warnings: &[String], status: &str) -> CommandResult<String> {
+  let output_dir = image_ai_output_dir(project)?;
+  fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+  let metadata_path = output_dir.join(format!("{output_id}.json"));
+  let value = serde_json::json!({
+    "outputId": output_id,
+    "textureId": texture_id,
+    "status": status,
+    "provider": "comfyui",
+    "sourcePngPath": request.get("sourcePngPath").and_then(|v| v.as_str()).unwrap_or(""),
+    "outputPngPath": output_path.map(|path| path.to_string_lossy().to_string()),
+    "prompt": request.get("prompt").and_then(|v| v.as_str()).unwrap_or(""),
+    "negativePrompt": request.get("negativePrompt").and_then(|v| v.as_str()).unwrap_or(""),
+    "seed": request.get("seed").and_then(|v| v.as_i64()).unwrap_or(0),
+    "settingsUsed": project.settings.get("imageAi").cloned().unwrap_or_default(),
+    "warnings": warnings,
+    "createdAt": now_string()
+  });
+  write_json_file(&metadata_path, &value)?;
+  Ok(metadata_path.to_string_lossy().to_string())
+}
+
+fn url_escape(value: &str) -> String {
+  value
+    .bytes()
+    .flat_map(|byte| match byte {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => vec![byte as char],
+      _ => format!("%{byte:02X}").chars().collect(),
+    })
+    .collect()
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+  u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or([0, 0, 0, 0]))
+}
+
+fn texture_metadata_warnings(metadata: &TextureMetadata) -> Vec<String> {
+  let mut warnings = metadata.warnings.clone();
+  warnings.extend(texture_role_warnings(&metadata.role_guess));
+  if metadata.width.is_none() || metadata.height.is_none() || metadata.format.is_none() {
+    warnings.push("Missing metadata. Configure texconv or verify the DDS manually.".to_string());
+  }
+  if let (Some(width), Some(height)) = (metadata.width, metadata.height) {
+    if (width as u64) * (height as u64) > 4096 * 4096 {
+      warnings.push("Huge texture resolution. Conversion may be slow and memory-heavy.".to_string());
+    }
+    if !is_power_of_two(width) || !is_power_of_two(height) {
+      warnings.push("Non-power-of-two dimensions. Some DDS/game pipelines expect power-of-two textures.".to_string());
+    }
+  }
+  if metadata.mipmap_count.unwrap_or(1) > 1 {
+    warnings.push("Mipmapped texture. Preserve or regenerate mipmaps before export.".to_string());
+  }
+  unique_strings(warnings)
+}
+
+fn guess_texture_role(path: &str) -> String {
+  let text = path.to_ascii_lowercase();
+  let rules = [
+    ("normal", vec!["normal", "nrm", "_n.", "-n.", " bump"]),
+    ("specular", vec!["spec", "specular", "_s."]),
+    ("roughness", vec!["rough", "roughness"]),
+    ("mask", vec!["mask", "_m."]),
+    ("alpha", vec!["alpha", "opacity", "_a."]),
+    ("diffuse", vec!["diffuse", "diff", "_d."]),
+    ("albedo", vec!["albedo"]),
+    ("color", vec!["color", "colour", "col"]),
+    ("grass", vec!["grass", "foliage", "vegetation"]),
+    ("tree", vec!["tree", "trunk", "bark", "leaf"]),
+    ("bush", vec!["bush", "shrub"]),
+    ("road", vec!["road", "asphalt", "street", "pavement"]),
+    ("blood", vec!["blood", "wound"]),
+    ("decal", vec!["decal", "graffiti", "stain"]),
+    ("hud", vec!["hud"]),
+    ("ui", vec!["ui", "frontend", "menu"]),
+  ];
+  rules
+    .iter()
+    .find(|(_, needles)| needles.iter().any(|needle| text.contains(needle)))
+    .map(|(role, _)| (*role).to_string())
+    .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn texture_role_warnings(role: &str) -> Vec<String> {
+  let mut warnings = Vec::new();
+  if role == "normal" || role == "bump" {
+    warnings.push("Possible normal map. Direction-encoded colors need manual review.".to_string());
+  }
+  if role == "mask" || role == "specular" || role == "roughness" {
+    warnings.push("Possible mask/specular map. Channel meaning may be non-color data.".to_string());
+  }
+  if role == "alpha" {
+    warnings.push("Alpha texture. Preserve transparency during PNG editing and DDS compile.".to_string());
+  }
+  warnings
+}
+
+fn is_power_of_two(value: u32) -> bool {
+  value > 0 && (value & (value - 1)) == 0
+}
+
+fn safe_workspace_path_str(project: &ReduxProject, path: &str) -> CommandResult<PathBuf> {
+  let workspace = PathBuf::from(project.workspace_path.clone().ok_or_else(|| "Project missing workspace path.".to_string())?);
+  let workspace_root = workspace.canonicalize().map_err(|error| format!("Workspace path invalid: {error}"))?;
+  let candidate = PathBuf::from(path);
+  let canonical = candidate.canonicalize().map_err(|error| format!("Workspace texture path missing: {error}"))?;
+  if !canonical.starts_with(&workspace_root) {
+    return Err("Blocked unsafe texture path: target is outside project workspace.".to_string());
+  }
+  Ok(canonical)
+}
+
+fn texture_cache_dir(project: &ReduxProject, folder: &str) -> CommandResult<PathBuf> {
+  let workspace = PathBuf::from(project.workspace_path.clone().ok_or_else(|| "Project missing workspace path.".to_string())?);
+  Ok(workspace.join(".redux-ai").join(folder))
+}
+
+fn texture_converter_path(project: &ReduxProject) -> String {
+  project
+    .settings
+    .get("textureTools")
+    .and_then(|value| value.get("converterPath"))
+    .and_then(|value| value.as_str())
+    .or_else(|| project.settings.get("converterPaths").and_then(|value| value.get("ddsToImage")).and_then(|value| value.as_str()))
+    .unwrap_or_default()
+    .to_string()
+}
+
+fn texture_bool_setting(project: &ReduxProject, key: &str, default: bool) -> bool {
+  project
+    .settings
+    .get("textureTools")
+    .and_then(|value| value.get(key))
+    .and_then(|value| value.as_bool())
+    .unwrap_or(default)
+}
+
+fn texture_output_format(project: &ReduxProject, original: Option<&TextureMetadata>) -> String {
+  let preserve = texture_bool_setting(project, "preserveOriginalFormat", true);
+  if preserve {
+    if let Some(format) = original.and_then(|metadata| metadata.format.as_ref()) {
+      let mapped = match format.as_str() {
+        "DXT1" | "BC1" => "BC1_UNORM",
+        "DXT3" | "DXT5" | "BC3" => "BC3_UNORM",
+        "ATI2" | "BC5" => "BC5_UNORM",
+        _ => "",
+      };
+      if !mapped.is_empty() {
+        return mapped.to_string();
+      }
+    }
+  }
+  project
+    .settings
+    .get("textureTools")
+    .and_then(|value| value.get("defaultDdsFormat"))
+    .and_then(|value| value.as_str())
+    .unwrap_or("BC7_UNORM")
+    .to_string()
+}
+
+fn command_output_text(output: &std::process::Output) -> String {
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  format!("stdout:\n{}\nstderr:\n{}", stdout.trim(), stderr.trim())
+}
+
+fn unique_strings(values: Vec<String>) -> Vec<String> {
+  let mut unique = Vec::new();
+  for value in values {
+    if !value.trim().is_empty() && !unique.contains(&value) {
+      unique.push(value);
+    }
+  }
+  unique
 }
 
 fn scan_content(file_path: &str, section: &str, content: &str) -> Vec<ScanMatch> {
@@ -712,6 +1784,465 @@ fn load_project_file(path: &Path) -> CommandResult<ReduxProject> {
   Ok(project)
 }
 
+fn build_export_preview_value(project: &ReduxProject, export_name: &str, include_reports: bool, include_all_backups: bool, export_dir: Option<&Path>) -> CommandResult<serde_json::Value> {
+  let export_id = format!("export-{}", epoch_seconds());
+  let output_folder = export_dir
+    .map(|path| path.to_string_lossy().to_string())
+    .unwrap_or_else(|| {
+      let root = project.project_root.clone().unwrap_or_default();
+      Path::new(&root).join("exports").join(sanitize_file_name(export_name)).to_string_lossy().to_string()
+    });
+  let mut included_files = Vec::new();
+  let mut excluded = Vec::new();
+  let mut warnings = vec![
+    "Manual export package only. No GTA archives or original game files are modified.".to_string(),
+    "Import files manually with OpenIV or relevant tools.".to_string(),
+  ];
+  let mut included_sections: Vec<String> = Vec::new();
+
+  for entry in &project.changelog_entries {
+    let file_path = entry.get("filePath").and_then(|value| value.as_str()).unwrap_or_default();
+    let patch_id = entry.get("patchId").and_then(|value| value.as_str()).unwrap_or_default();
+    let section = entry.get("section").and_then(|value| value.as_str()).unwrap_or("dashboard");
+    let Some(file) = project.files.iter().find(|file| file.relative_path == file_path) else {
+      excluded.push(serde_json::json!({ "id": format!("patch-{patch_id}"), "label": file_path, "section": section, "reason": "Applied changelog target no longer exists in project files." }));
+      continue;
+    };
+    if file.status != "text-readable" {
+      excluded.push(serde_json::json!({ "id": format!("file-{}", file.id), "label": file.relative_path, "section": file.section, "reason": "Only patched text workspace files are eligible here." }));
+      continue;
+    }
+    let source = PathBuf::from(&file.workspace_path);
+    if !source.exists() {
+      excluded.push(serde_json::json!({ "id": format!("file-{}", file.id), "label": file.relative_path, "section": file.section, "reason": "Workspace edited file missing." }));
+      continue;
+    }
+    included_sections.push(section.to_string());
+    included_files.push(serde_json::json!({
+      "id": format!("text-{patch_id}"),
+      "section": section,
+      "type": "edited_text",
+      "sourceWorkspacePath": file.workspace_path,
+      "outputRelativePath": format!("edited_files/{}", normalize_relative(&file.relative_path)),
+      "intendedGameRelativePath": file.relative_path,
+      "originalPath": file.source_path,
+      "originalHash": file_hash(Path::new(&file.workspace_path)).ok(),
+      "sizeBytes": fs::metadata(&source).map(|m| m.len()).unwrap_or(0),
+      "riskLevel": entry.get("risk").and_then(|value| value.as_str()).unwrap_or("medium"),
+      "patchIds": [patch_id],
+      "warnings": file.warnings
+    }));
+  }
+
+  for review_value in &project.patch_reviews {
+    let status = review_value.get("reviewStatus").and_then(|value| value.as_str()).unwrap_or("unknown");
+    if status != "applied" {
+      let title = review_value.pointer("/suggestion/title").and_then(|value| value.as_str()).unwrap_or("patch");
+      let section = review_value.get("section").and_then(|value| value.as_str()).unwrap_or("dashboard");
+      let reason = if status == "accepted" { "Accepted but not applied to workspace." } else { "Patch not applied; excluded." };
+      if status == "accepted" {
+        warnings.push(format!("{title}: accepted patch is unapplied and excluded."));
+      }
+      excluded.push(serde_json::json!({ "id": review_value.get("id").cloned().unwrap_or_default(), "label": title, "section": section, "reason": reason }));
+    }
+  }
+
+  for texture in &project.textures {
+    let file_name = texture.get("fileName").and_then(|value| value.as_str()).unwrap_or("texture.dds");
+    let relative_path = normalize_relative(texture.get("relativePath").and_then(|value| value.as_str()).unwrap_or(""));
+    let export_ready = texture.get("exportReady").and_then(|value| value.as_bool()).unwrap_or(false);
+    let Some(compiled) = texture.get("compiledDdsPath").and_then(|value| value.as_str()).filter(|value| !value.is_empty()) else {
+      if !export_ready {
+        excluded.push(serde_json::json!({ "id": texture.get("textureId").cloned().unwrap_or_default(), "label": file_name, "section": "textures", "reason": "Texture not marked export-ready." }));
+      }
+      continue;
+    };
+    if !export_ready {
+      excluded.push(serde_json::json!({ "id": texture.get("textureId").cloned().unwrap_or_default(), "label": file_name, "section": "textures", "reason": "Compiled DDS exists but not marked export-ready." }));
+      continue;
+    }
+    let output_relative = if relative_path.is_empty() { format!("compiled_textures/unmapped/{file_name}") } else { format!("compiled_textures/{relative_path}") };
+    if relative_path.is_empty() {
+      warnings.push(format!("{file_name}: compiled texture has no intended relative path; exported under compiled_textures/unmapped."));
+    }
+    let texture_warnings = texture.get("warnings").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    warnings.extend(texture_warnings.iter().filter_map(|value| value.as_str()).map(|value| format!("{file_name}: {value}")));
+    included_sections.push("textures".to_string());
+    included_files.push(serde_json::json!({
+      "id": format!("texture-{}", texture.get("textureId").and_then(|value| value.as_str()).unwrap_or(file_name)),
+      "section": "textures",
+      "type": "compiled_texture",
+      "sourceWorkspacePath": compiled,
+      "outputRelativePath": output_relative,
+      "intendedGameRelativePath": if relative_path.is_empty() { format!("unmapped/{file_name}") } else { relative_path },
+      "originalPath": texture.get("originalPath").and_then(|value| value.as_str()).unwrap_or_default(),
+      "sizeBytes": fs::metadata(compiled).map(|m| m.len()).unwrap_or(0),
+      "riskLevel": if texture.get("roleGuess").and_then(|value| value.as_str()) == Some("normal") { "high" } else { "medium" },
+      "patchIds": [],
+      "textureId": texture.get("textureId").and_then(|value| value.as_str()).unwrap_or_default(),
+      "warnings": texture.get("warnings").cloned().unwrap_or_else(|| serde_json::json!([]))
+    }));
+  }
+
+  if include_all_backups {
+    for backup in &project.backups {
+      if let Some(path) = backup.get("backupPath").and_then(|value| value.as_str()) {
+        let rel = backup.get("filePath").or_else(|| backup.get("workspacePath")).and_then(|value| value.as_str()).unwrap_or("backup");
+        included_files.push(serde_json::json!({
+          "id": backup.get("id").and_then(|value| value.as_str()).unwrap_or(path),
+          "section": backup.get("section").and_then(|value| value.as_str()).unwrap_or("backups"),
+          "type": "backup",
+          "sourceWorkspacePath": path,
+          "outputRelativePath": format!("original_backups/{}", normalize_relative(rel)),
+          "intendedGameRelativePath": normalize_relative(rel),
+          "sizeBytes": fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+          "riskLevel": "low",
+          "patchIds": [backup.get("patchId").and_then(|value| value.as_str()).unwrap_or_default()],
+          "warnings": []
+        }));
+      }
+    }
+  } else {
+    for entry in &project.changelog_entries {
+      if let Some(path) = entry.get("backupPath").and_then(|value| value.as_str()) {
+        let rel = entry.get("filePath").and_then(|value| value.as_str()).unwrap_or("backup");
+        included_files.push(serde_json::json!({
+          "id": format!("backup-{}", entry.get("patchId").and_then(|value| value.as_str()).unwrap_or(rel)),
+          "section": entry.get("section").and_then(|value| value.as_str()).unwrap_or("backups"),
+          "type": "backup",
+          "sourceWorkspacePath": path,
+          "outputRelativePath": format!("original_backups/{}", normalize_relative(rel)),
+          "intendedGameRelativePath": normalize_relative(rel),
+          "sizeBytes": fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+          "riskLevel": entry.get("risk").and_then(|value| value.as_str()).unwrap_or("low"),
+          "patchIds": [entry.get("patchId").and_then(|value| value.as_str()).unwrap_or_default()],
+          "warnings": []
+        }));
+      }
+    }
+  }
+
+  if include_reports {
+    warnings.push("Reports folder included when report files exist.".to_string());
+    for output in &project.image_generation_history {
+      if let Some(path) = output.get("metadataPath").and_then(|value| value.as_str()).filter(|value| !value.is_empty()) {
+        let name = Path::new(path).file_name().map(|value| value.to_string_lossy().to_string()).unwrap_or_else(|| "image_ai_metadata.json".to_string());
+        included_files.push(serde_json::json!({
+          "id": format!("image-ai-meta-{name}"),
+          "section": "reports",
+          "type": "report",
+          "sourceWorkspacePath": path,
+          "outputRelativePath": format!("reports/image_ai/{name}"),
+          "intendedGameRelativePath": "reports only",
+          "sizeBytes": fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+          "riskLevel": "low",
+          "patchIds": [],
+          "warnings": ["AI generation metadata only; compiled DDS remains the game-ready output."]
+        }));
+      }
+    }
+  }
+  included_sections.sort();
+  included_sections.dedup();
+  warnings = unique_strings(warnings);
+  let estimated_file_count = included_files.len() + if include_reports { 6 } else { 5 };
+  let estimated_size: u64 = included_files.iter().filter_map(|value| value.get("sizeBytes").and_then(|size| size.as_u64())).sum();
+  let blockers = export_blockers(project, export_name, &included_files);
+  let install_notes_preview = build_install_notes_text(export_name, &included_files, &serde_json::json!(warnings));
+  let manifest_preview = serde_json::json!({
+    "exportId": export_id,
+    "projectId": project.project_id,
+    "projectName": project.project_name,
+    "exportName": export_name,
+    "appVersion": APP_VERSION,
+    "includedSections": included_sections,
+    "fileCount": included_files.len(),
+    "files": included_files,
+    "warnings": warnings,
+    "installNotesPath": "install_notes.txt",
+    "changelogPath": "changelog.md"
+  });
+  Ok(serde_json::json!({
+    "exportId": export_id,
+    "projectId": project.project_id,
+    "projectName": project.project_name,
+    "exportName": export_name,
+    "outputFolder": output_folder,
+    "includedSections": included_sections,
+    "includedFiles": included_files,
+    "excludedItems": excluded,
+    "warnings": warnings,
+    "blockers": blockers,
+    "unappliedAcceptedPatches": project.patch_reviews.iter().filter(|review| review.get("reviewStatus").and_then(|value| value.as_str()) == Some("accepted")).count(),
+    "highRiskChanges": manifest_preview["files"].as_array().unwrap_or(&Vec::new()).iter().filter(|file| file.get("riskLevel").and_then(|value| value.as_str()) == Some("high")).count(),
+    "estimatedFileCount": estimated_file_count,
+    "estimatedExportSizeBytes": estimated_size,
+    "installNotesPreview": install_notes_preview,
+    "manifestPreview": manifest_preview
+  }))
+}
+
+fn export_blockers(project: &ReduxProject, export_name: &str, included_files: &[serde_json::Value]) -> Vec<String> {
+  let mut blockers = Vec::new();
+  if export_name.trim().is_empty() {
+    blockers.push("Export name is empty.".to_string());
+  }
+  if project.save_status != "Saved" {
+    blockers.push("Project has unsaved changes. Save before export.".to_string());
+  }
+  if included_files.is_empty() {
+    blockers.push("No eligible files exist for export.".to_string());
+  }
+  if project.project_root.is_none() || project.workspace_path.is_none() {
+    blockers.push("Project workspace folders are missing.".to_string());
+  }
+  blockers
+}
+
+fn versioned_export_path(base: &Path) -> PathBuf {
+  if !base.exists() {
+    return base.to_path_buf();
+  }
+  for index in 2..1000 {
+    let candidate = PathBuf::from(format!("{}_{}", base.to_string_lossy(), index));
+    if !candidate.exists() {
+      return candidate;
+    }
+  }
+  unique_path(base.to_path_buf())
+}
+
+fn safe_export_source_path(project: &ReduxProject, source: &str) -> CommandResult<PathBuf> {
+  let candidate = PathBuf::from(source);
+  let canonical = candidate.canonicalize().map_err(|error| format!("Export source missing: {error}"))?;
+  let workspace = PathBuf::from(project.workspace_path.clone().ok_or_else(|| "Project missing workspace path.".to_string())?).canonicalize().map_err(|error| error.to_string())?;
+  let root = PathBuf::from(project.project_root.clone().ok_or_else(|| "Project missing root.".to_string())?).canonicalize().map_err(|error| error.to_string())?;
+  let allowed = [
+    workspace.clone(),
+    workspace.join(".redux-ai").join("texture-compiled"),
+    root.join("backups"),
+    root.join("reports"),
+  ];
+  if allowed.iter().any(|base| canonical.starts_with(base)) {
+    Ok(canonical)
+  } else {
+    Err("Blocked unsafe export source outside workspace/backups/reports.".to_string())
+  }
+}
+
+fn safe_export_destination(export_dir: &Path, output_relative: &str) -> CommandResult<PathBuf> {
+  let safe_relative = normalize_relative(output_relative);
+  let destination = export_dir.join(Path::new(&safe_relative));
+  let parent = destination.parent().unwrap_or(export_dir);
+  fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+  let export_root = export_dir.canonicalize().map_err(|error| error.to_string())?;
+  let parent_canon = parent.canonicalize().map_err(|error| error.to_string())?;
+  if !parent_canon.starts_with(&export_root) {
+    return Err("Blocked unsafe export destination path traversal.".to_string());
+  }
+  Ok(destination)
+}
+
+fn copy_project_reports(project: &ReduxProject, export_dir: &Path) -> CommandResult<Vec<serde_json::Value>> {
+  let mut records = Vec::new();
+  let root = PathBuf::from(project.project_root.clone().ok_or_else(|| "Project missing root.".to_string())?);
+  let reports = root.join("reports");
+  if !reports.exists() {
+    return Ok(records);
+  }
+  for entry in fs::read_dir(&reports).map_err(|error| error.to_string())? {
+    let path = entry.map_err(|error| error.to_string())?.path();
+    if !path.is_file() {
+      continue;
+    }
+    let file_name = path.file_name().map(|value| value.to_string_lossy().to_string()).unwrap_or_else(|| "report.txt".to_string());
+    let output_relative = format!("reports/{file_name}");
+    let destination = safe_export_destination(export_dir, &output_relative)?;
+    fs::copy(&path, &destination).map_err(|error| error.to_string())?;
+    records.push(serde_json::json!({
+      "id": format!("report-{file_name}"),
+      "section": "reports",
+      "type": "report",
+      "sourceWorkspacePath": path.to_string_lossy(),
+      "outputRelativePath": output_relative,
+      "intendedGameRelativePath": "reports only",
+      "outputHash": file_hash(&destination)?,
+      "sizeBytes": fs::metadata(&destination).map(|m| m.len()).unwrap_or(0),
+      "riskLevel": "low",
+      "patchIds": [],
+      "warnings": []
+    }));
+  }
+  Ok(records)
+}
+
+fn build_manifest_value(project: &ReduxProject, export_name: &str, export_id: &str, export_dir: &Path, files: &[serde_json::Value], warnings: serde_json::Value) -> serde_json::Value {
+  let sections: Vec<String> = unique_strings(files.iter().filter_map(|file| file.get("section").and_then(|value| value.as_str()).map(|value| value.to_string())).collect());
+  let size: u64 = files.iter().filter_map(|file| file.get("sizeBytes").and_then(|value| value.as_u64())).sum();
+  serde_json::json!({
+    "exportId": export_id,
+    "projectId": project.project_id,
+    "projectName": project.project_name,
+    "exportName": export_name,
+    "createdAt": now_string(),
+    "appVersion": APP_VERSION,
+    "includedSections": sections,
+    "fileCount": files.len(),
+    "exportSizeBytes": size,
+    "files": files,
+    "patches": project.changelog_entries,
+    "textures": project.textures.iter().filter(|texture| texture.get("exportReady").and_then(|value| value.as_bool()).unwrap_or(false)).collect::<Vec<_>>(),
+    "backups": files.iter().filter(|file| file.get("type").and_then(|value| value.as_str()) == Some("backup")).collect::<Vec<_>>(),
+    "reports": files.iter().filter(|file| file.get("type").and_then(|value| value.as_str()) == Some("report")).collect::<Vec<_>>(),
+    "warnings": warnings,
+    "installNotesPath": "install_notes.txt",
+    "changelogPath": "changelog.md",
+    "exportPath": export_dir.to_string_lossy()
+  })
+}
+
+fn build_install_notes_text(export_name: &str, files: &[serde_json::Value], warnings: &serde_json::Value) -> String {
+  let mut lines = vec![
+    format!("Redux AI Assistant export: {export_name}"),
+    String::new(),
+    "This export does not install anything automatically.".to_string(),
+    "Original game files were not modified.".to_string(),
+    "Do not copy this package directly into update.rpf. Use OpenIV or relevant tools manually.".to_string(),
+    "edited_files/ contains changed text/config files.".to_string(),
+    "compiled_textures/ contains ready DDS outputs.".to_string(),
+    "original_backups/ contains workspace backups from edits.".to_string(),
+    "reports/ contains AI, scan, validation, and texture reports.".to_string(),
+    String::new(),
+    "Recommended install order: warnings, text configs, textures, scripts/resources, then in-game test.".to_string(),
+    String::new(),
+    "File mapping:".to_string(),
+  ];
+  for file in files {
+    let out = file.get("outputRelativePath").and_then(|value| value.as_str()).unwrap_or("");
+    let target = file.get("intendedGameRelativePath").and_then(|value| value.as_str()).unwrap_or("");
+    lines.push(format!("{out}\n-> intended location:\n{target}"));
+  }
+  lines.push(String::new());
+  lines.push("Warnings/high-risk:".to_string());
+  if let Some(items) = warnings.as_array() {
+    for warning in items {
+      if let Some(text) = warning.as_str() {
+        lines.push(format!("- {text}"));
+      }
+    }
+  }
+  lines.join("\n")
+}
+
+fn build_export_changelog(project: &ReduxProject, export_name: &str, files: &[serde_json::Value], warnings: &serde_json::Value) -> String {
+  let mut lines = vec![
+    "# Redux AI Assistant Export Changelog".to_string(),
+    String::new(),
+    format!("Project: {}", project.project_name),
+    format!("Export: {export_name}"),
+    format!("Timestamp: {}", now_string()),
+    String::new(),
+    "## Applied Patches".to_string(),
+  ];
+  for entry in &project.changelog_entries {
+    lines.push(format!("- {} -> {}", entry.get("suggestionTitle").and_then(|v| v.as_str()).unwrap_or("patch"), entry.get("filePath").and_then(|v| v.as_str()).unwrap_or("file")));
+  }
+  lines.push(String::new());
+  lines.push("## Compiled Textures".to_string());
+  for file in files.iter().filter(|file| file.get("type").and_then(|value| value.as_str()) == Some("compiled_texture")) {
+    lines.push(format!("- {}", file.get("outputRelativePath").and_then(|value| value.as_str()).unwrap_or("texture")));
+  }
+  lines.push(String::new());
+  lines.push("## Backups".to_string());
+  for file in files.iter().filter(|file| file.get("type").and_then(|value| value.as_str()) == Some("backup")) {
+    lines.push(format!("- {}", file.get("outputRelativePath").and_then(|value| value.as_str()).unwrap_or("backup")));
+  }
+  lines.push(String::new());
+  lines.push("## Warnings".to_string());
+  if let Some(items) = warnings.as_array() {
+    for warning in items.iter().filter_map(|value| value.as_str()) {
+      lines.push(format!("- {warning}"));
+    }
+  }
+  lines.push(String::new());
+  lines.push("## Testing Checklist".to_string());
+  lines.push("- Test one section at a time.".to_string());
+  lines.push("- Verify textures with alpha/normal/mipmap warnings in game.".to_string());
+  lines.push("- Keep original backups until final QA passes.".to_string());
+  lines.join("\n")
+}
+
+fn build_warnings_md(preview: &serde_json::Value) -> String {
+  let mut lines = vec!["# Export Warnings".to_string(), String::new(), "## Unresolved Warnings".to_string()];
+  for warning in preview.get("warnings").and_then(|value| value.as_array()).into_iter().flatten().filter_map(|value| value.as_str()) {
+    lines.push(format!("- {warning}"));
+  }
+  lines.push(String::new());
+  lines.push("## Excluded Items".to_string());
+  for item in preview.get("excludedItems").and_then(|value| value.as_array()).into_iter().flatten() {
+    let label = item.get("label").and_then(|value| value.as_str()).unwrap_or("item");
+    let reason = item.get("reason").and_then(|value| value.as_str()).unwrap_or("excluded");
+    lines.push(format!("- {label}: {reason}"));
+  }
+  lines.push(String::new());
+  lines.push("## Blockers".to_string());
+  for blocker in preview.get("blockers").and_then(|value| value.as_array()).into_iter().flatten().filter_map(|value| value.as_str()) {
+    lines.push(format!("- {blocker}"));
+  }
+  lines.join("\n")
+}
+
+fn validate_export_dir(export_dir: &Path, manifest: &serde_json::Value) -> CommandResult<serde_json::Value> {
+  let mut errors = Vec::new();
+  let mut warnings = Vec::new();
+  for required in ["manifest.json", "install_notes.txt", "changelog.md", "warnings.md"] {
+    if !export_dir.join(required).exists() {
+      errors.push(format!("Required file missing: {required}"));
+    }
+  }
+  let export_root = export_dir.canonicalize().map_err(|error| error.to_string())?;
+  for file in manifest.get("files").and_then(|value| value.as_array()).into_iter().flatten() {
+    let output = file.get("outputRelativePath").and_then(|value| value.as_str()).unwrap_or("");
+    let path = safe_export_destination(export_dir, output)?;
+    if !path.exists() {
+      errors.push(format!("Manifest output missing: {output}"));
+      continue;
+    }
+    let canon = path.canonicalize().map_err(|error| error.to_string())?;
+    if !canon.starts_with(&export_root) {
+      errors.push(format!("Output outside export folder: {output}"));
+    }
+    if fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0) == 0 {
+      warnings.push(format!("Output file is empty: {output}"));
+    }
+    if let Some(expected) = file.get("outputHash").and_then(|value| value.as_str()) {
+      let actual = file_hash(&path)?;
+      if actual != expected {
+        errors.push(format!("Hash mismatch: {output}"));
+      }
+    }
+  }
+  if manifest.get("warnings").and_then(|value| value.as_array()).map(|value| value.is_empty()).unwrap_or(true) {
+    warnings.push("No warnings recorded in manifest.".to_string());
+  }
+  Ok(serde_json::json!({ "ok": errors.is_empty(), "errors": errors, "warnings": warnings }))
+}
+
+fn write_json_file(path: &Path, value: &serde_json::Value) -> CommandResult<()> {
+  let content = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+  fs::write(path, content).map_err(|error| error.to_string())
+}
+
+fn file_hash(path: &Path) -> CommandResult<String> {
+  let bytes = fs::read(path).map_err(|error| error.to_string())?;
+  let mut hash: u64 = 0xcbf29ce484222325;
+  for byte in bytes {
+    hash ^= byte as u64;
+    hash = hash.wrapping_mul(0x100000001b3);
+  }
+  Ok(format!("fnv1a64:{hash:016x}"))
+}
+
 fn save_project_file(project: &mut ReduxProject) -> CommandResult<()> {
   let project_json_path = project
     .project_json_path
@@ -729,6 +2260,45 @@ fn save_report(project: &ReduxProject, section: &str, kind: &str, content: &str)
   fs::create_dir_all(&reports).map_err(|error| error.to_string())?;
   let file_name = format!("{}_{}_{}.md", sanitize_file_name(section), kind, epoch_seconds());
   fs::write(reports.join(file_name), content).map_err(|error| error.to_string())
+}
+
+fn save_named_report(project: &ReduxProject, file_name: &str, content: &str) -> CommandResult<()> {
+  let root = project.project_root.as_ref().ok_or_else(|| "Project missing project root.".to_string())?;
+  let reports = Path::new(root).join("reports");
+  fs::create_dir_all(&reports).map_err(|error| error.to_string())?;
+  fs::write(reports.join(file_name), content).map_err(|error| error.to_string())
+}
+
+fn build_texture_report(project: &ReduxProject, notes: String) -> String {
+  let mut lines = vec![
+    "# Texture Workflow Report".to_string(),
+    String::new(),
+    format!("Project: {}", project.project_name),
+    format!("Generated: {}", now_string()),
+    String::new(),
+    "## Textures".to_string(),
+  ];
+  for texture in &project.textures {
+    let file = texture.get("fileName").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let status = texture.get("conversionStatus").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let ready = texture.get("exportReady").and_then(|v| v.as_bool()).unwrap_or(false);
+    let role = texture.get("roleGuess").and_then(|v| v.as_str()).unwrap_or("unknown");
+    lines.push(format!("- `{file}` role `{role}` status `{status}` exportReady `{ready}`"));
+    for key in ["originalPath", "workspacePath", "previewPngPath", "editedPngPath", "compiledDdsPath"] {
+      if let Some(value) = texture.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+        lines.push(format!("  - {key}: `{value}`"));
+      }
+    }
+    if let Some(warnings) = texture.get("warnings").and_then(|v| v.as_array()) {
+      for warning in warnings.iter().filter_map(|v| v.as_str()) {
+        lines.push(format!("  - Warning: {warning}"));
+      }
+    }
+  }
+  lines.push(String::new());
+  lines.push("## Manual Notes".to_string());
+  lines.push(if notes.trim().is_empty() { "No manual notes.".to_string() } else { notes });
+  lines.join("\n")
 }
 
 fn extract_assistant_content(raw: &str) -> String {
@@ -1044,6 +2614,56 @@ fn preview_text(content: &str) -> String {
   content.lines().take(220).collect::<Vec<_>>().join("\n")
 }
 
+fn read_text_limited(path: &Path, max_bytes: usize, max_line_chars: usize) -> CommandResult<TextReadResult> {
+  let bytes = fs::read(path).map_err(|error| error.to_string())?;
+  let mut warning = None;
+  if looks_binary(&bytes) {
+    return Err("File looks binary despite text-readable extension.".to_string());
+  }
+  let slice = if bytes.len() > max_bytes {
+    warning = Some(format!("Large file scanned partially: first {max_bytes} bytes of {} bytes.", bytes.len()));
+    &bytes[..max_bytes]
+  } else {
+    &bytes[..]
+  };
+  let decoded = decode_text(slice);
+  let text = decoded
+    .lines()
+    .map(|line| line.chars().take(max_line_chars).collect::<String>())
+    .collect::<Vec<_>>()
+    .join("\n");
+  Ok(TextReadResult { text, warning })
+}
+
+fn decode_text(bytes: &[u8]) -> String {
+  if bytes.starts_with(&[0xFF, 0xFE]) {
+    let words = bytes[2..].chunks_exact(2).map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])).collect::<Vec<_>>();
+    return String::from_utf16_lossy(&words);
+  }
+  if bytes.starts_with(&[0xFE, 0xFF]) {
+    let words = bytes[2..].chunks_exact(2).map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]])).collect::<Vec<_>>();
+    return String::from_utf16_lossy(&words);
+  }
+  String::from_utf8_lossy(bytes).to_string()
+}
+
+fn looks_binary(bytes: &[u8]) -> bool {
+  let sample = &bytes[..bytes.len().min(4096)];
+  sample.iter().filter(|byte| **byte == 0).count() > 8
+}
+
+fn max_scan_bytes(project: &ReduxProject) -> usize {
+  project.settings.get("limits").and_then(|v| v.get("maxScanBytes")).and_then(|v| v.as_u64()).unwrap_or(2_097_152) as usize
+}
+
+fn max_line_chars(project: &ReduxProject) -> usize {
+  project.settings.get("limits").and_then(|v| v.get("maxLinePreviewChars")).and_then(|v| v.as_u64()).unwrap_or(240) as usize
+}
+
+fn max_scan_results(project: &ReduxProject) -> usize {
+  project.settings.get("limits").and_then(|v| v.get("maxScanResults")).and_then(|v| v.as_u64()).unwrap_or(500) as usize
+}
+
 fn normalize_relative(relative_path: &str) -> String {
   relative_path
     .replace('\\', "/")
@@ -1111,10 +2731,30 @@ pub fn run() {
       scan_project,
       save_project,
       export_project,
+      build_export_preview,
+      create_export_package,
+      validate_export_package,
+      open_export_folder,
+      save_install_notes,
+      save_export_manifest,
+      test_comfyui_connection,
+      list_comfyui_models,
+      send_comfyui_image_to_image,
+      get_comfyui_job_status,
+      download_comfyui_output,
+      cancel_comfyui_job,
       save_prompt_report,
       save_ai_response_report,
+      inspect_dds_metadata,
+      inspect_texture_metadata,
+      check_texture_tools,
+      convert_dds_to_png,
+      import_edited_texture_png,
+      convert_png_to_dds,
+      save_texture_report,
       send_openrouter_chat_request,
       read_workspace_file,
+      reveal_in_file_manager,
       write_workspace_file,
       create_workspace_backup,
       validate_patch,

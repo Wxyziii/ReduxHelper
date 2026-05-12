@@ -38,7 +38,7 @@ export default function FileList({ files, selectedFileId, onSelect, onImportFile
             <span>{file.status}<MoveRight size={12} /></span>
             <span onClick={(event) => event.stopPropagation()}>
               <select className="sectionSelect" value={file.section} onChange={(event) => onSectionChange(file.id, event.target.value as SectionId)}>
-                {sectionOrder.filter((id) => !["dashboard", "export", "settings"].includes(id)).map((id) => (
+                {sectionOrder.filter((id) => !["dashboard", "intelligence", "export", "settings"].includes(id)).map((id) => (
                   <option key={id} value={id}>{id}</option>
                 ))}
               </select>

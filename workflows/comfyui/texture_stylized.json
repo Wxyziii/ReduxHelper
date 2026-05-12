@@ -1,0 +1,8 @@
+{
+  "name": "texture_stylized",
+  "description": "Subtle stylized texture preset. Intended for diffuse textures only.",
+  "warnings": [
+    "Avoid on normal maps, masks, specular, or roughness textures."
+  ],
+  "todo": "Add model-specific preset parameters after model detection is richer."
+}

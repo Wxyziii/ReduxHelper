@@ -77,6 +77,14 @@ select:focus {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 h1,
 h2,
 h3,
@@ -1034,10 +1042,49 @@ button.fileRow {
   position: absolute;
   inset: 0 auto 0 0;
   overflow: hidden;
+  border-right: 1px solid var(--accent);
+}
+
+.richEmpty {
+  min-height: 150px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px;
+  text-align: center;
+}
+
+.richEmpty p,
+.richEmpty small {
+  max-width: 640px;
+  color: var(--fg-secondary);
+}
+
+.textureBefore.mock {
   background:
     repeating-linear-gradient(35deg, rgba(255, 255, 255, 0.04) 0 8px, transparent 8px 18px),
     radial-gradient(circle at 46% 40%, #444, #202020 44%, #0d0d0d 70%);
-  border-right: 1px solid var(--accent);
+}
+
+.textureImage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.textureImage.edited {
+  background: #111;
+}
+
+.textureEmpty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
 }
 
 .textureHandle {
@@ -1094,6 +1141,30 @@ button.fileRow {
   padding: 3px 8px;
 }
 
+.textureGallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.textureOutputCard {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+  padding: 8px;
+}
+
+.textureOutputCard img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: #0f0f0f;
+}
+
 .step {
   display: flex;
   align-items: center;
@@ -1111,6 +1182,16 @@ button.fileRow {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   gap: 16px;
+}
+
+.intelligenceGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+  gap: 16px;
+}
+
+.basketRow {
+  grid-template-columns: 32px minmax(120px, 1fr) 90px minmax(0, 1.5fr) 34px;
 }
 
 .formGrid {
@@ -1175,6 +1256,129 @@ button.fileRow {
 
 .exportResult p {
   color: var(--fg-secondary);
+}
+
+.operationRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 90px 140px minmax(160px, 1fr) 34px;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+  color: var(--fg-secondary);
+}
+
+.operationRow progress {
+  width: 100%;
+}
+
+.errorPanel {
+  border-color: rgba(192, 57, 43, 0.45);
+}
+
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.72);
+  padding: 20px;
+}
+
+.modalCard {
+  display: flex;
+  width: min(680px, 100%);
+  max-height: calc(100vh - 40px);
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+  border: 1px solid var(--border-emphasis);
+  border-radius: 8px;
+  background: var(--surface-1);
+  padding: 20px;
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.45);
+}
+
+.modalCard label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.onboardingCard h2,
+.modalCard h2 {
+  font-size: 20px;
+}
+
+.onboardingStep {
+  display: grid;
+  gap: 12px;
+}
+
+.helpDrawer {
+  position: fixed;
+  top: 44px;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: min(420px, 100vw);
+  overflow: auto;
+  border-left: 1px solid var(--border);
+  background: var(--surface-1);
+  padding: 16px;
+  box-shadow: -20px 0 60px rgba(0, 0, 0, 0.35);
+}
+
+.helpTopic,
+.helpBlock,
+.toolCard,
+.workflowCard {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+  padding: 12px;
+}
+
+.helpTopic p,
+.workflowCard li,
+.toolCard p,
+.toolCard small,
+.helpContent {
+  color: var(--fg-secondary);
+}
+
+.helpToggle {
+  color: var(--fg);
+  text-align: left;
+}
+
+.helpContent {
+  margin-top: 8px;
+}
+
+.toolGrid,
+.workflowGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.workflowCard {
+  display: grid;
+  gap: 10px;
+}
+
+.workflowCard ol {
+  margin: 0;
+  padding-left: 18px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
 }
 
 .settingsPage {
@@ -1297,6 +1501,7 @@ button.fileRow {
   .textureLayout,
   .dashboardGrid,
   .exportGrid,
+  .intelligenceGrid,
   .patchReviewLayout {
     grid-template-columns: 1fr;
   }

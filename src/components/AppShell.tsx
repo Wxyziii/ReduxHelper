@@ -16,6 +16,7 @@ interface Props {
     importFolder: () => Promise<void>;
     scanProject: () => Promise<void>;
     saveProject: () => Promise<void>;
+    openHelp: () => void;
   };
   message: string;
 }

@@ -1,1 +1,2 @@
-export type { FileStatus, ProjectFile, ScanMatch, TextureAsset } from "./project";
+export type { FileStatus, ProjectFile, ScanMatch } from "./project";
+export type { TextureAsset } from "./textures";

@@ -1,5 +1,6 @@
 import { sections } from "./mockSections";
-import type { AiResponse, ExportManifest, PatchSuggestion, ProjectFile, ReduxProject, TextureAsset } from "../types/project";
+import type { AiResponse, ExportManifest, PatchSuggestion, ProjectFile, ReduxProject } from "../types/project";
+import type { TextureAsset } from "../types/textures";
 
 const filePreviews: Record<string, string> = {
   "common/data/timecycle/timecycle_modifiers.xml":
@@ -259,44 +260,81 @@ export const mockAiResponses: AiResponse[] = [
 
 export const mockTextures: TextureAsset[] = [
   {
-    id: "tex-road",
+    textureId: "tex-road",
+    section: "textures",
+    originalPath: "C:/redux/source/textures/road_asphalt_d.dds",
+    workspacePath: "C:/redux/project/workspace/textures/road_asphalt_d.dds",
     fileName: "road_asphalt_d.dds",
     relativePath: "textures/road_asphalt_d.dds",
-    width: 2048,
-    height: 2048,
-    format: "BC3/DXT5 placeholder",
-    hasAlpha: "unknown",
-    mipmaps: "unknown",
-    guessedType: "diffuse",
-    status: "Edited image ready",
+    previewPngPath: "",
+    editedPngPath: "C:/redux/project/workspace/.redux-ai/texture-edits/road_asphalt_d_edited.png",
+    compiledDdsPath: "",
+    metadata: {
+      filePath: "C:/redux/project/workspace/textures/road_asphalt_d.dds",
+      filename: "road_asphalt_d.dds",
+      width: 2048,
+      height: 2048,
+      format: "BC3/DXT5 placeholder",
+      mipmapCount: 8,
+      hasAlpha: "unknown",
+      fileSizeBytes: 5592405,
+      roleGuess: "diffuse",
+      warnings: ["Mipmapped texture. Preserve or regenerate mipmaps before export."]
+    },
+    roleGuess: "diffuse",
+    conversionStatus: "edited_png_attached",
+    exportReady: false,
     warnings: ["Mipmaps and compression need converter confirmation."],
     notes: "DDS -> PNG preview mocked. Edited PNG queued for PNG -> DDS conversion."
   },
   {
-    id: "tex-grass-normal",
+    textureId: "tex-grass-normal",
+    section: "textures",
+    originalPath: "C:/redux/source/textures/grass_normal_n.dds",
+    workspacePath: "C:/redux/project/workspace/textures/grass_normal_n.dds",
     fileName: "grass_normal_n.dds",
     relativePath: "textures/grass_normal_n.dds",
-    width: 1024,
-    height: 1024,
-    format: "BC5 placeholder",
-    hasAlpha: "no",
-    mipmaps: "unknown",
-    guessedType: "normal",
-    status: "Warning",
+    metadata: {
+      filePath: "C:/redux/project/workspace/textures/grass_normal_n.dds",
+      filename: "grass_normal_n.dds",
+      width: 1024,
+      height: 1024,
+      format: "BC5 placeholder",
+      mipmapCount: 1,
+      hasAlpha: "no",
+      fileSizeBytes: 4194304,
+      roleGuess: "normal",
+      warnings: ["Possible normal map. Direction-encoded colors need manual review."]
+    },
+    roleGuess: "normal",
+    conversionStatus: "metadata_ready",
+    exportReady: false,
     warnings: ["Normal map. Do not use normal photo enhancement prompts."],
     notes: "Manual review needed before any image workflow."
   },
   {
-    id: "tex-leaf",
+    textureId: "tex-leaf",
+    section: "textures",
+    originalPath: "C:/redux/source/textures/foliage/leaf_atlas_a.dds",
+    workspacePath: "C:/redux/project/workspace/textures/foliage/leaf_atlas_a.dds",
     fileName: "leaf_atlas_a.dds",
     relativePath: "textures/foliage/leaf_atlas_a.dds",
-    width: 1024,
-    height: 1024,
-    format: "BC3/DXT5 placeholder",
-    hasAlpha: "yes",
-    mipmaps: "unknown",
-    guessedType: "alpha",
-    status: "Preview ready",
+    previewPngPath: "C:/redux/project/workspace/.redux-ai/texture-previews/leaf_atlas_a.png",
+    metadata: {
+      filePath: "C:/redux/project/workspace/textures/foliage/leaf_atlas_a.dds",
+      filename: "leaf_atlas_a.dds",
+      width: 1024,
+      height: 1024,
+      format: "BC3/DXT5 placeholder",
+      mipmapCount: 6,
+      hasAlpha: "yes",
+      fileSizeBytes: 3145728,
+      roleGuess: "alpha",
+      warnings: ["Alpha texture. Preserve transparency during PNG editing and DDS compile."]
+    },
+    roleGuess: "alpha",
+    conversionStatus: "preview_ready",
+    exportReady: false,
     warnings: ["Alpha transparency must be preserved."],
     notes: "Preview ready. Edited image not imported."
   }
@@ -350,6 +388,13 @@ export const mockProject: ReduxProject = {
   patchBatches: [],
   patches: mockPatches,
   textures: mockTextures,
+  exportHistory: [],
+  imageGenerationHistory: [],
+  promptBasket: [],
+  diagnostics: [],
+  lastIndexedAt: "2026-05-11T12:00:00Z",
+  scanCache: {},
+  operationHistory: [],
   settings: {
     aiProvider: "OpenRouter-compatible",
     apiKey: "",
@@ -367,6 +412,31 @@ export const mockProject: ReduxProject = {
       imageToDds: "C:/tools/texconv/texconv.exe",
       metadataInspector: "C:/tools/ddsinfo/ddsinfo.exe"
     },
+    textureTools: {
+      converterPath: "C:/tools/texconv/texconv.exe",
+      defaultDdsFormat: "BC7_UNORM",
+      generateMipmaps: true,
+      preserveOriginalFormat: true,
+      preserveAlpha: true,
+      backupBeforeReplace: true,
+      previewFolder: ".redux-ai/texture-previews"
+    },
+    imageAi: {
+      provider: "manual",
+      comfyuiUrl: "http://127.0.0.1:8188",
+      workflowPreset: "img2img_basic",
+      outputFolder: ".redux-ai/image-ai",
+      seedMode: "random",
+      fixedSeed: 123456,
+      steps: 24,
+      cfg: 6,
+      denoise: 0.45,
+      sampler: "euler",
+      checkpoint: "",
+      timeoutSeconds: 180,
+      saveRawWorkflowJson: true,
+      saveGenerationMetadata: true
+    },
     safety: {
       createBackups: true,
       validatePatchTargets: true,
@@ -377,6 +447,17 @@ export const mockProject: ReduxProject = {
     experimental: {
       imageWorkflow: false,
       batchTextures: false
+    },
+    logging: {
+      debugLogging: false,
+      retentionLimit: 250
+    },
+    limits: {
+      maxPreviewBytes: 262144,
+      maxScanBytes: 2097152,
+      maxLinePreviewChars: 240,
+      maxScanResults: 500,
+      maxPromptChars: 12000
     }
   }
 };

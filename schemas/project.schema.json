@@ -37,6 +37,36 @@
     },
     "settings": {
       "type": "object"
+    },
+    "textures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/textureAsset"
+      }
+    },
+    "exportHistory": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/exportHistoryEntry"
+      }
+    },
+    "imageGenerationHistory": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/imageGeneratedOutput"
+      }
+    },
+    "promptBasket": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/promptBasketItem"
+      }
+    },
+    "diagnostics": {
+      "type": "array"
+    },
+    "scanCache": {
+      "type": "object"
     }
   },
   "definitions": {
@@ -122,6 +152,303 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "textureAsset": {
+      "type": "object",
+      "required": [
+        "textureId",
+        "section",
+        "originalPath",
+        "workspacePath",
+        "relativePath",
+        "fileName",
+        "roleGuess",
+        "warnings",
+        "conversionStatus",
+        "exportReady"
+      ],
+      "properties": {
+        "textureId": {
+          "type": "string"
+        },
+        "section": {
+          "const": "textures"
+        },
+        "originalPath": {
+          "type": "string"
+        },
+        "workspacePath": {
+          "type": "string"
+        },
+        "relativePath": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "previewPngPath": {
+          "type": "string"
+        },
+        "editedPngPath": {
+          "type": "string"
+        },
+        "compiledDdsPath": {
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/definitions/textureMetadata"
+        },
+        "roleGuess": {
+          "type": "string"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "conversionStatus": {
+          "enum": [
+            "imported",
+            "metadata_ready",
+            "preview_ready",
+            "edited_png_attached",
+            "compiled_dds_ready",
+            "export_ready",
+            "failed"
+          ]
+        },
+        "exportReady": {
+          "type": "boolean"
+        },
+        "lastConvertedAt": {
+          "type": "string"
+        },
+        "converterSettingsUsed": {
+          "type": "object"
+        },
+        "generatedOutputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/imageGeneratedOutput"
+          }
+        },
+        "currentEditedPngSource": {
+          "enum": [
+            "manual_import",
+            "image_ai"
+          ]
+        },
+        "currentEditedOutputId": {
+          "type": "string"
+        }
+      }
+    },
+    "textureMetadata": {
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "format": {
+          "type": "string"
+        },
+        "mipmapCount": {
+          "type": "number"
+        },
+        "hasAlpha": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown"
+          ]
+        },
+        "fileSizeBytes": {
+          "type": "number"
+        },
+        "roleGuess": {
+          "type": "string"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "exportHistoryEntry": {
+      "type": "object",
+      "required": [
+        "exportId",
+        "exportName",
+        "createdAt",
+        "exportPath",
+        "fileCount",
+        "sections",
+        "warningsCount",
+        "manifestPath",
+        "status"
+      ],
+      "properties": {
+        "exportId": {
+          "type": "string"
+        },
+        "exportName": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "exportPath": {
+          "type": "string"
+        },
+        "fileCount": {
+          "type": "number"
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warningsCount": {
+          "type": "number"
+        },
+        "manifestPath": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "success",
+            "failed"
+          ]
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "imageGeneratedOutput": {
+      "type": "object",
+      "required": [
+        "outputId",
+        "textureId",
+        "prompt",
+        "negativePrompt",
+        "seed",
+        "provider",
+        "createdAt",
+        "warnings",
+        "status"
+      ],
+      "properties": {
+        "outputId": {
+          "type": "string"
+        },
+        "textureId": {
+          "type": "string"
+        },
+        "outputPath": {
+          "type": "string"
+        },
+        "thumbnailPath": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "negativePrompt": {
+          "type": "string"
+        },
+        "seed": {
+          "type": "number"
+        },
+        "provider": {
+          "enum": [
+            "manual",
+            "comfyui",
+            "future"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "settingsUsed": {
+          "type": "object"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "enum": [
+            "generated",
+            "attached_as_edited",
+            "rejected",
+            "failed"
+          ]
+        },
+        "metadataPath": {
+          "type": "string"
+        }
+      }
+    },
+    "promptBasketItem": {
+      "type": "object",
+      "required": [
+        "snippetId",
+        "fileId",
+        "filePath",
+        "section",
+        "lineNumber",
+        "linePreview",
+        "contextLines",
+        "source"
+      ],
+      "properties": {
+        "snippetId": {
+          "type": "string"
+        },
+        "fileId": {
+          "type": "string"
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "section": {
+          "type": "string"
+        },
+        "lineNumber": {
+          "type": "number"
+        },
+        "linePreview": {
+          "type": "string"
+        },
+        "contextLines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "enum": [
+            "user",
+            "suggested"
+          ]
         }
       }
     }

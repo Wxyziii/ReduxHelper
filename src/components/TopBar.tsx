@@ -1,4 +1,4 @@
-import { Bot, Check, Download, FileInput, FolderInput, FolderOpen, FolderPlus, FolderSearch, Save, Settings, ShieldCheck } from "lucide-react";
+import { Bot, Check, Download, FileInput, FolderInput, FolderOpen, FolderPlus, FolderSearch, HelpCircle, Save, Settings, ShieldCheck } from "lucide-react";
 import type { ReduxProject, SectionId } from "../types/project";
 
 interface Props {
@@ -11,6 +11,7 @@ interface Props {
     importFolder: () => Promise<void>;
     scanProject: () => Promise<void>;
     saveProject: () => Promise<void>;
+    openHelp: () => void;
   };
 }
 
@@ -48,6 +49,9 @@ export default function TopBar({ project, setActivePage, actions }: Props) {
         </button>
         <button className="iconBtn" onClick={actions.saveProject} title="Save project.json">
           <ShieldCheck size={17} />
+        </button>
+        <button className="iconBtn" onClick={actions.openHelp} title="Help">
+          <HelpCircle size={17} />
         </button>
         <button className="iconBtn" onClick={() => setActivePage("settings")} title="Settings">
           <Settings size={17} />

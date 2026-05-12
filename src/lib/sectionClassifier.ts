@@ -1,4 +1,5 @@
 import type { SectionId } from "../types/project";
+import { isTextureExtension } from "./textureTypes";
 
 function hasAny(text: string, keywords: string[]) {
   return keywords.some((keyword) => text.includes(keyword));
@@ -6,7 +7,7 @@ function hasAny(text: string, keywords: string[]) {
 
 export function classifySection(relativePath: string, extension: string): SectionId {
   const text = relativePath.toLowerCase();
-  if (extension === ".dds" || hasAny(text, ["texture", ".ytd", "diffuse", "normal", "spec", "alpha", "mipmap", "road"])) return "textures";
+  if (isTextureExtension(extension) || hasAny(text, ["texture", ".ytd", "diffuse", "normal", "spec", "alpha", "mipmap", "road"])) return "textures";
   if (hasAny(text, ["script", "kill", "overlay", "nui"])) return "killEffect";
   if (hasAny(text, ["blood", "decal", "impact", "spark", "particle", "wound"])) return "hitEffects";
   if (hasAny(text, ["tracer", "bullet", "weapon", "muzzle", "core.ypt", "projectile", "beam"])) return "tracers";

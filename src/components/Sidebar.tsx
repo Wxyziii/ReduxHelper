@@ -4,6 +4,7 @@ import {
   Download,
   Gauge,
   Image,
+  Search,
   LayoutDashboard,
   Settings,
   Skull,
@@ -22,6 +23,7 @@ const icons: Record<SectionId, typeof LayoutDashboard> = {
   killEffect: Skull,
   optimization: Bolt,
   textures: Image,
+  intelligence: Search,
   export: Download,
   settings: Settings
 };

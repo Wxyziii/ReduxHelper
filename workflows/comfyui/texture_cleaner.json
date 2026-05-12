@@ -1,0 +1,6 @@
+{
+  "name": "texture_cleaner",
+  "description": "Cleaner game texture preset. Preserve layout, reduce noise, avoid logos/text/borders.",
+  "recommendedNegativePrompt": "text, logo, watermark, border, large object, distorted tile, broken pattern",
+  "todo": "Add optional ControlNet/tile model nodes when configured."
+}

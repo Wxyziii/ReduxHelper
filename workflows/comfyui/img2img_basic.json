@@ -1,0 +1,11 @@
+{
+  "name": "img2img_basic",
+  "description": "Basic ComfyUI img2img texture edit preset. Runtime injects source image, prompt, negative prompt, seed, steps, cfg, denoise, sampler, and checkpoint.",
+  "schemaNotes": {
+    "sourceImage": "LoadImage.image",
+    "prompt": "CLIPTextEncode positive text",
+    "negativePrompt": "CLIPTextEncode negative text",
+    "output": "SaveImage PNG copied into workspace/.redux-ai/image-ai"
+  },
+  "todo": "Expose custom node graph editing after Phase 7."
+}

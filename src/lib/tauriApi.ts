@@ -3,6 +3,30 @@ import { createBrowserProject, importBrowserFile, scanBrowserProject } from "./p
 import type { OpenRouterRequest, OpenRouterResponse } from "../types/ai";
 import type { PatchReviewState, PatchValidationResult } from "../types/patches";
 import type { ReduxProject } from "../types/project";
+export {
+  buildExportPreview,
+  createExportPackage,
+  openExportFolder,
+  validateExportPackage
+} from "./exportApi";
+
+export {
+  cancelComfyUiJob,
+  getComfyUiJobStatus,
+  listComfyUiModels,
+  sendComfyUiImageToImage,
+  testComfyUiConnection
+} from "./imageAiApi";
+
+export {
+  checkTextureTools,
+  convertDdsToPng,
+  convertPngToDds,
+  importEditedTexturePng,
+  inspectDdsMetadata,
+  inspectTextureMetadata,
+  saveTextureReport
+} from "./textureApi";
 
 export interface TauriCommandResponse {
   ok: boolean;
@@ -88,6 +112,10 @@ export function applyAcceptedPatches(project: ReduxProject, reviews: PatchReview
 export function readWorkspaceFile(project: ReduxProject, relativePath: string) {
   const file = project.files.find((item) => item.relativePath === relativePath);
   return callTauri<string>("read_workspace_file", file?.preview ?? "", { project, relativePath });
+}
+
+export function revealInFileManager(path: string) {
+  return callTauri("reveal_in_file_manager", response("reveal_in_file_manager", `Browser mock: ${path}`), { path });
 }
 
 async function callTauri<T>(command: string, browserMock: T, args?: Record<string, unknown>): Promise<T> {

@@ -8,6 +8,7 @@ export const sectionOrder: SectionId[] = [
   "killEffect",
   "optimization",
   "textures",
+  "intelligence",
   "export",
   "settings"
 ];
@@ -61,6 +62,13 @@ export const sections: Record<SectionId, ProjectSection> = {
     description: "DDS -> PNG preview -> AI/manual edit -> DDS export workflow.",
     goal: "Sharpen road and grass diffuse textures while preserving alpha and mipmaps.",
     warnings: ["DDS is never edited directly; converter output must be reviewed."]
+  },
+  intelligence: {
+    id: "intelligence",
+    name: "Intelligence",
+    description: "Global search, indexing, prompt basket, relationships, diagnostics, and project health.",
+    goal: "Find relevant files and snippets before asking AI for targeted changes.",
+    warnings: []
   },
   export: {
     id: "export",

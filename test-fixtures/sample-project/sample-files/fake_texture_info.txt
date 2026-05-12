@@ -1,0 +1,4 @@
+Synthetic DDS placeholder metadata:
+file=grass_01.dds
+role=diffuse
+alpha=unknown

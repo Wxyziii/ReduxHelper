@@ -1,4 +1,5 @@
 import { Check, ClipboardCopy, FileDiff, ShieldCheck, X } from "lucide-react";
+import HelpBlock from "./ui/HelpBlock";
 import { buildDiffRows } from "../lib/diffBuilder";
 import type { PatchReviewState } from "../types/patches";
 
@@ -39,6 +40,9 @@ export default function PatchReviewPanel({ reviews, selectedId, isApplying, onSe
         <span>{acceptedCount} accepted</span>
         <span>{appliedCount} applied</span>
       </div>
+      <HelpBlock title="Patch safety">
+        <p>Validation checks that a suggestion targets one workspace copy. Applying accepted patches creates a backup first and never writes original files or archives.</p>
+      </HelpBlock>
 
       {!reviews.length && <div className="emptyState">No validated AI suggestions persisted yet. Validate an AI response above to create patch reviews.</div>}
 

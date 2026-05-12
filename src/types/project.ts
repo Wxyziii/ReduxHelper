@@ -1,5 +1,10 @@
 import type { AiHistoryEntry, AiSuggestion } from "./ai";
+import type { ExportHistoryEntry } from "./exports";
+import type { ImageAiSettings, ImageGeneratedOutput } from "./imageAi";
+import type { ProjectDiagnostic } from "./indexing";
 import type { BackupRecord, ChangelogEntry, PatchApplyResult, PatchBatch, PatchReviewState } from "./patches";
+import type { PromptBasketItem } from "./promptBasket";
+import type { TextureAsset } from "./textures";
 
 export type SectionId =
   | "dashboard"
@@ -9,6 +14,7 @@ export type SectionId =
   | "killEffect"
   | "optimization"
   | "textures"
+  | "intelligence"
   | "export"
   | "settings";
 
@@ -75,21 +81,6 @@ export interface ProjectSection {
   warnings: string[];
 }
 
-export interface TextureAsset {
-  id: string;
-  fileName: string;
-  relativePath: string;
-  width: number;
-  height: number;
-  format: string;
-  hasAlpha: "yes" | "no" | "unknown";
-  mipmaps: "yes" | "no" | "unknown";
-  guessedType: "diffuse" | "normal" | "mask" | "alpha";
-  status: "Imported" | "Preview ready" | "Needs AI edit" | "Edited image ready" | "DDS exported" | "Warning";
-  warnings: string[];
-  notes: string;
-}
-
 export interface ExportManifest {
   projectName: string;
   exportName: string;
@@ -124,6 +115,16 @@ export interface AppSettings {
     imageToDds: string;
     metadataInspector: string;
   };
+  textureTools: {
+    converterPath: string;
+    defaultDdsFormat: string;
+    generateMipmaps: boolean;
+    preserveOriginalFormat: boolean;
+    preserveAlpha: boolean;
+    backupBeforeReplace: boolean;
+    previewFolder: string;
+  };
+  imageAi: ImageAiSettings;
   safety: {
     createBackups: boolean;
     validatePatchTargets: boolean;
@@ -134,6 +135,17 @@ export interface AppSettings {
   experimental: {
     imageWorkflow: boolean;
     batchTextures: boolean;
+  };
+  logging: {
+    debugLogging: boolean;
+    retentionLimit: number;
+  };
+  limits: {
+    maxPreviewBytes: number;
+    maxScanBytes: number;
+    maxLinePreviewChars: number;
+    maxScanResults: number;
+    maxPromptChars: number;
   };
 }
 
@@ -160,5 +172,12 @@ export interface ReduxProject {
   patchBatches: PatchBatch[];
   patches: PatchSuggestion[];
   textures: TextureAsset[];
+  exportHistory: ExportHistoryEntry[];
+  imageGenerationHistory: ImageGeneratedOutput[];
+  promptBasket: PromptBasketItem[];
+  diagnostics: ProjectDiagnostic[];
+  lastIndexedAt?: string;
+  scanCache?: Record<string, { hash?: string; lastScannedAt?: string; durationMs?: number; warning?: string }>;
+  operationHistory?: import("./operations").OperationTask[];
   settings: AppSettings;
 }

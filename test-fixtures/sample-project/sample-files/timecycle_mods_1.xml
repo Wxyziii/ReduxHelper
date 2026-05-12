@@ -1,0 +1,6 @@
+<timecycle>
+  <weather name="EXTRASUNNY">
+    <sky_intensity value="1.0" />
+    <fog_density value="0.35" />
+  </weather>
+</timecycle>

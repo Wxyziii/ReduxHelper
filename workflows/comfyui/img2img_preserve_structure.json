@@ -1,0 +1,10 @@
+{
+  "name": "img2img_preserve_structure",
+  "description": "Lower-denoise img2img preset for texture structure/tileability preservation.",
+  "recommended": {
+    "denoise": 0.35,
+    "cfg": 5.5,
+    "steps": 24
+  },
+  "todo": "Map this preset to a dedicated ComfyUI workflow graph in a later phase."
+}
